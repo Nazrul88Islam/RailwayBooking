@@ -351,6 +351,13 @@ export class RailwayAdapter {
 
     if (!matchedCard) return false;
 
+    // Auto-scroll page so target train card (e.g. KALNI EXPRESS 773) is centered on screen
+    try {
+      matchedCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch (e) {
+      matchedCard.scrollIntoView();
+    }
+
     // 4. Search for class sub-blocks & BOOK NOW button inside the target train card
     const targetClassQuery = seatClass.toUpperCase().trim();
     const allButtons = Array.from(matchedCard.querySelectorAll('button, a, .btn-book-now'));

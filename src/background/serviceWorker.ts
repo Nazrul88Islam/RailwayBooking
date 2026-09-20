@@ -85,8 +85,8 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
               chrome.tabs.sendMessage(activeTab.id!, {
                 type: MessageType.START_AUTOMATION,
                 payload: { settings }
-              });
-            }, 300);
+              }).catch(() => {});
+            }, 100);
           } catch (err) {
             addLog(`Content script connection note: Ensure you are on eticket.railway.gov.bd and refresh the page (F5).`, 'warning');
           }
