@@ -3,6 +3,7 @@ import { SeatInfo, CoachSeatMap } from './SeatTypes';
 export class SeatRelationshipAnalyzer {
   /**
    * Find contiguous adjacent seats in the same physical row within a coach.
+   * (col difference must be exactly 1, so seats on opposite sides of an aisle never qualify.)
    */
   public static findAdjacentSeats(coach: CoachSeatMap, count: number): SeatInfo[][] {
     const availableSeats = coach.seats.filter(s => s.isAvailable);
@@ -44,32 +45,45 @@ export class SeatRelationshipAnalyzer {
   }
 
   /**
-   * Find face-to-face pairs (seats in consecutive rows with matching column positions)
+   * Find face-to-face groups (seats in consecutive rows with matching column positions).
+   *   count === 2 → one seat facing another   (same col, rows r and r+1)
+   *   count === 4 → a 2×2 block                (rows r,r+1 × adjacent cols c,c+1)
+   * Other counts have no face-to-face arrangement.
    */
-  public static findFaceToFacePairs(coach: CoachSeatMap, count: number): SeatInfo[][] {
+  public static findFaceToFacePairs(coach: CoachSeatMap, count: number = 2): SeatInfo[][] {
     const availableSeats = coach.seats.filter(s => s.isAvailable);
     const validGroups: SeatInfo[][] = [];
 
-    // Group by col
-    const colMap = new Map<number, SeatInfo[]>();
-    availableSeats.forEach(s => {
-      if (!colMap.has(s.col)) colMap.set(s.col, []);
-      colMap.get(s.col)!.push(s);
-    });
+    const at = new Map<string, SeatInfo>();
+    availableSeats.forEach(s => at.set(`${s.row}:${s.col}`, s));
 
-    colMap.forEach((colSeats) => {
-      colSeats.sort((a, b) => a.row - b.row);
+    if (count === 2) {
+      const colMap = new Map<number, SeatInfo[]>();
+      availableSeats.forEach(s => {
+        if (!colMap.has(s.col)) colMap.set(s.col, []);
+        colMap.get(s.col)!.push(s);
+      });
 
-      for (let i = 0; i < colSeats.length - 1; i++) {
-        const s1 = colSeats[i];
-        const s2 = colSeats[i + 1];
-
-        // Face-to-face pairs are in adjacent rows (row diff === 1) in same column
-        if (s2.row === s1.row + 1) {
-          validGroups.push([s1, s2]);
+      colMap.forEach((colSeats) => {
+        colSeats.sort((a, b) => a.row - b.row);
+        for (let i = 0; i < colSeats.length - 1; i++) {
+          const s1 = colSeats[i];
+          const s2 = colSeats[i + 1];
+          if (s2.row === s1.row + 1) {
+            validGroups.push([s1, s2]);
+          }
         }
-      }
-    });
+      });
+    } else if (count === 4) {
+      availableSeats.forEach(s => {
+        const right = at.get(`${s.row}:${s.col + 1}`);
+        const below = at.get(`${s.row + 1}:${s.col}`);
+        const belowRight = at.get(`${s.row + 1}:${s.col + 1}`);
+        if (right && below && belowRight) {
+          validGroups.push([s, right, below, belowRight]);
+        }
+      });
+    }
 
     return validGroups;
   }

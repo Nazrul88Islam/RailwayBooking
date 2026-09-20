@@ -1,8 +1,18 @@
 import { BookingSettings, AutomationState, LogItem } from '../shared/types';
-import { RailwayAdapter } from '../content/railway/RailwayAdapter';
+import { RailwayAdapter, CoachOption } from '../content/railway/RailwayAdapter';
 import { SeatMapParser } from './seat/SeatMapParser';
 import { SeatSelectionEngine } from './seat/SeatSelectionEngine';
-import { CoachSeatMap } from './seat/SeatTypes';
+import { CoachSeatMap, SeatInfo } from './seat/SeatTypes';
+
+/** Bangladesh Railway lets you book at most 4 seats per transaction. */
+const MAX_SEATS_PER_BOOKING = 4;
+
+interface SeatPlan {
+  coachName: string;
+  seats: SeatInfo[];
+  modeUsed: string;
+  reason?: string;
+}
 
 export class AutomationEngine {
   private abortController: AbortController | null = null;
@@ -23,10 +33,12 @@ export class AutomationEngine {
   /**
    * Number of seats to book. Popup/storage values often arrive as strings ("2"), and the old
    * strict `seats.length !== settings.seatCount` check then ALWAYS failed. Always coerce.
+   * Capped at the site's limit of 4 seats per booking.
    */
   private get seatCount(): number {
     const n = Math.floor(Number(this.settings.seatCount));
-    return Number.isFinite(n) && n > 0 ? n : 1;
+    const wanted = Number.isFinite(n) && n > 0 ? n : 1;
+    return Math.min(wanted, MAX_SEATS_PER_BOOKING);
   }
 
   /**
@@ -110,6 +122,13 @@ export class AutomationEngine {
       this.onLog('Automation engine initialized', 'info');
       this.onStateChange(AutomationState.STARTING, 'Starting booking process...');
 
+      if (Number(this.settings.seatCount) > MAX_SEATS_PER_BOOKING) {
+        this.onLog(
+          `Railway allows at most ${MAX_SEATS_PER_BOOKING} seats per booking — using ${MAX_SEATS_PER_BOOKING} instead of ${this.settings.seatCount}.`,
+          'warning'
+        );
+      }
+
       if (!this.settings.targetTrain || !this.settings.targetTrain.trim()) {
         this.onLog('No target train configured.', 'error');
         this.onStateChange(AutomationState.ERROR, 'Please enter a target train name or number.');
@@ -141,12 +160,15 @@ export class AutomationEngine {
         }
       }
 
-      // ── STEP 5: Seat map (choose coach with enough seats) ─────────────────
-      const coachMaps = await this.waitForSeatMap(signal);
-      if (coachMaps === null) return; // error already reported
+      // ── STEP 5: wait until the seat page is ready ─────────────────────────
+      if (!(await this.waitForSeatMapReady(signal))) return;
 
-      // ── STEP 6 + 7: pick exactly N seats, continue, final safety check ────
-      await this.selectSeatsAndContinue(coachMaps, signal);
+      // ── STEP 6: scan coaches → best coach/seats for the mode → click seats ─
+      const selectedSeats = await this.chooseAndSelectSeats(signal);
+      if (!selectedSeats) return; // error already reported
+
+      // ── STEP 7: Continue + final safety check ──────────────────────────────
+      await this.continueToNextStep(selectedSeats.length, signal);
     } catch (err: any) {
       if (err.message === 'Automation aborted by user') {
         this.onLog('Automation cancelled by user.', 'warning');
@@ -404,7 +426,7 @@ export class AutomationEngine {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // STEP 5 — seat map
+  // STEP 5 — wait for the seat page
   // ══════════════════════════════════════════════════════════════════════════
 
   private countAvailable(maps: CoachSeatMap[]): number {
@@ -414,140 +436,347 @@ export class AutomationEngine {
     );
   }
 
-  /** Returns the parsed coach maps, or null if an error was already reported. */
-  private async waitForSeatMap(signal: AbortSignal): Promise<CoachSeatMap[] | null> {
+  private async waitForSeatMapReady(signal: AbortSignal): Promise<boolean> {
     this.checkAborted(signal);
-
-    const need = this.seatCount;
-
     this.onStateChange(
       AutomationState.WAITING_FOR_SEAT_MAP,
       `Waiting for ${this.settings.seatClass} seat map...`
     );
 
-    let coachMaps: CoachSeatMap[] = [];
-    const maxSeatMapAttempts = 40;
-
-    for (let attempt = 0; attempt < maxSeatMapAttempts; attempt++) {
+    const maxAttempts = 40;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       this.checkAborted(signal);
 
       if (this.isHomePage()) {
         this.onLog('Page returned to homepage while waiting for seat map. Aborting.', 'error');
         this.onStateChange(AutomationState.ERROR, 'Railway returned to homepage unexpectedly.');
-        return null;
+        return false;
       }
 
-      // Pick a coach that has enough seats for the requested seat count.
-      const coachSelected = RailwayAdapter.selectBestCoachFromDropdown(need);
-      if (coachSelected) {
-        this.onLog(`Coach selected for ${need} requested seat(s).`, 'info');
-        await this.delay(500, signal);
-      }
-
-      coachMaps = SeatMapParser.parseFromDOM(document);
-      const availableSeatsCount = this.countAvailable(coachMaps);
+      const coaches = RailwayAdapter.getCoachOptions();
+      const seatsOnPage = this.countAvailable(SeatMapParser.parseFromDOM(document));
 
       this.onLog(
-        `Seat-map attempt ${attempt + 1}/${maxSeatMapAttempts}: ${availableSeatsCount} available seat(s), ${need} required.`,
+        `Seat page check ${attempt + 1}/${maxAttempts}: ${coaches.length} coach(es) listed, ${seatsOnPage} seat(s) on page.`,
         'info'
       );
 
-      if (availableSeatsCount >= need) {
-        this.onLog(`Enough seats found: ${availableSeatsCount}/${need}.`, 'success');
-        break;
-      }
-
-      if (availableSeatsCount > 0) {
-        this.onLog(
-          `Only ${availableSeatsCount} seat(s) available; ${need} required. Waiting for a suitable coach/seat layout...`,
-          'warning'
-        );
-      }
-
-      // Coach TABS (no dropdown): only cycle to another coach while we still lack seats.
-      // (Old code clicked a tab on every iteration, even after finding enough seats.)
-      if (!RailwayAdapter.hasCoachDropdown() && RailwayAdapter.clickAvailableCoachTab()) {
-        await this.delay(400, signal);
-      }
-
+      if (coaches.length > 0 || seatsOnPage > 0) return true;
       await this.delay(350, signal);
     }
 
-    return coachMaps;
+    this.onLog(`No seat map detected for ${this.settings.targetTrain} / ${this.settings.seatClass}.`, 'error');
+    this.onStateChange(AutomationState.ERROR, 'Seat map was not loaded.');
+    return false;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // STEP 6 / 7 — pick exactly N seats and continue
+  // STEP 6 — find the best coach + seats, then click them
   // ══════════════════════════════════════════════════════════════════════════
 
-  private async selectSeatsAndContinue(coachMaps: CoachSeatMap[], signal: AbortSignal): Promise<void> {
+  /** Parse the page and mark seats we already failed to click as unavailable. */
+  private readMaps(excluded: Set<string>): CoachSeatMap[] {
+    const maps = SeatMapParser.parseFromDOM(document);
+    maps.forEach(m => m.seats.forEach(s => {
+      if (excluded.has(s.id)) s.isAvailable = false;
+    }));
+    return maps;
+  }
+
+  private findFreshSeat(seat: SeatInfo): SeatInfo | null {
+    for (const map of SeatMapParser.parseFromDOM(document)) {
+      const hit = map.seats.find(s => s.id === seat.id);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  /** The DOM node may have been re-rendered since we parsed it — re-resolve it by seat id. */
+  private resolveSeatElement(seat: SeatInfo): HTMLElement | null {
+    const raw = seat.rawElement as HTMLElement | undefined;
+    if (raw && raw.isConnected) return raw;
+    const fresh = this.findFreshSeat(seat);
+    return (fresh?.rawElement as HTMLElement | undefined) || null;
+  }
+
+  private coachSignature(map: CoachSeatMap): string {
+    return map.seats.map(s => `${s.name}:${s.isAvailable ? 1 : 0}`).join('|');
+  }
+
+  /** Switch the dropdown to `opt` and wait until the new coach's seat layout has rendered. */
+  private async loadCoach(opt: CoachOption, excluded: Set<string>, signal: AbortSignal): Promise<CoachSeatMap | null> {
+    const alreadySelected = RailwayAdapter.getSelectedCoachIndex() === opt.index;
+    if (!alreadySelected) {
+      RailwayAdapter.selectCoachOption(opt);
+    }
+    await this.delay(alreadySelected ? 100 : 400, signal);
+
+    // Wait until two consecutive parses agree (layout finished rendering)
+    let previous = '';
+    for (let i = 0; i < 20; i++) {
+      this.checkAborted(signal);
+      const maps = this.readMaps(excluded);
+      const map = maps.find(m => m.coachName === opt.coachName) || maps[0];
+
+      if (map && map.seats.length > 0) {
+        const sig = this.coachSignature(map);
+        if (sig === previous) return map;
+        previous = sig;
+      }
+      await this.delay(150, signal);
+    }
+    return null;
+  }
+
+  private logCoach(map: CoachSeatMap): void {
+    const avail = map.seats.filter(s => s.isAvailable).length;
+    this.onLog(
+      `Coach ${map.coachName}: ${avail} available of ${map.seats.length} seat(s) parsed (${map.rows} rows × ${map.cols} cols).`,
+      'info'
+    );
+    console.log(`[Railway] Seat grid for coach ${map.coachName} (x = booked/in-progress, * = selected, | = aisle):\n${SeatMapParser.formatGrid(map)}`);
+  }
+
+  private fail(logMsg: string, status: string): null {
+    this.onLog(logMsg, 'error');
+    this.onStateChange(AutomationState.ERROR, status);
+    return null;
+  }
+
+  /**
+   * Choose the best coach and seats for the requested seat count + mode.
+   *
+   *  1. Coaches that cannot hold `need` seats are skipped; the rest are tried largest-first.
+   *  2. The first coach that satisfies the requested mode EXACTLY wins (and stays selected).
+   *  3. If none does and fallback is allowed, the coach offering the closest arrangement wins
+   *     (adjacent > face-to-face > best available).
+   */
+  private async planBestSeats(excluded: Set<string>, signal: AbortSignal): Promise<SeatPlan | null> {
     const need = this.seatCount;
+    const mode = this.settings.seatMode;
+    const allowFallback = this.settings.allowFallback;
 
-    if (coachMaps.length === 0) {
-      this.onLog(`No seat map detected for ${this.settings.targetTrain} / ${this.settings.seatClass}.`, 'error');
-      this.onStateChange(AutomationState.ERROR, 'Seat map was not loaded.');
-      return;
+    // ── Page without a coach dropdown (single view or coach tabs) ──────────
+    if (!RailwayAdapter.hasCoachDropdown()) {
+      for (let i = 0; i < 8; i++) {
+        this.checkAborted(signal);
+        const maps = this.readMaps(excluded);
+        if (maps.length) {
+          const strict = SeatSelectionEngine.selectSeats(maps, need, mode, false);
+          if (strict.success && strict.seats.length === need) {
+            return { coachName: strict.seats[0].coach, seats: strict.seats, modeUsed: strict.modeUsed };
+          }
+        }
+        if (!RailwayAdapter.clickAvailableCoachTab()) break;
+        await this.delay(450, signal);
+      }
+
+      const maps = this.readMaps(excluded);
+      if (!maps.length) return this.fail('No seats could be read from the page.', 'Seat map was not loaded.');
+      maps.forEach(m => this.logCoach(m));
+
+      const res = SeatSelectionEngine.selectSeats(maps, need, mode, allowFallback);
+      if (!res.success || res.seats.length !== need) {
+        return this.fail(`Seat selection failed: ${res.reason}`, res.reason || 'Seat selection failed.');
+      }
+      return { coachName: res.seats[0].coach, seats: res.seats, modeUsed: res.modeUsed, reason: res.reason };
     }
 
-    this.onStateChange(
-      AutomationState.ANALYZING_SEATS,
-      `Selecting ${need} ${this.settings.seatClass} seat(s)...`
-    );
+    // ── Dropdown: scan coaches ─────────────────────────────────────────────
+    const options = RailwayAdapter.getCoachOptions()
+      .filter(o => o.available >= need)
+      .sort((a, b) => b.available - a.available);
 
-    const totalAvailable = this.countAvailable(coachMaps);
-
-    if (totalAvailable < need) {
-      this.onLog(`Only ${totalAvailable} seat(s) available but ${need} requested.`, 'error');
-      this.onStateChange(AutomationState.ERROR, `Not enough ${this.settings.seatClass} seats available.`);
-      return;
-    }
-
-    const selectionResult = SeatSelectionEngine.selectSeats(
-      coachMaps,
-      need,
-      this.settings.seatMode,
-      this.settings.allowFallback
-    );
-
-    if (!selectionResult.success) {
-      this.onLog(`Seat selection failed: ${selectionResult.reason}`, 'error');
-      this.onStateChange(AutomationState.ERROR, selectionResult.reason);
-      return;
-    }
-
-    // Never continue with a partial selection.
-    const selectedCount = selectionResult.seats?.length || 0;
-    if (selectedCount !== need) {
-      this.onLog(
-        `Seat selection failed. Requested ${need}, but only ${selectedCount} seat(s) could be selected. No checkout action will be performed.`,
-        'error'
+    if (!options.length) {
+      return this.fail(
+        `No coach has ${need} available seat(s).`,
+        `Not enough ${this.settings.seatClass} seats available (need ${need} in one coach).`
       );
-      this.onStateChange(AutomationState.ERROR, `Could not select exactly ${need} seat(s).`);
-      return;
     }
 
     this.onLog(
-      `Selecting exactly ${selectedCount} seat(s): ${selectionResult.seats.map(s => s.name).join(', ')}`,
-      'success'
+      `Coaches with ≥${need} seat(s): ${options.map(o => `${o.coachName}(${o.available})`).join(', ')} — looking for mode '${mode}'.`,
+      'info'
     );
 
-    // Click selected seats.
-    for (const seat of selectionResult.seats) {
+    const scanned: { opt: CoachOption; map: CoachSeatMap }[] = [];
+    let lastLoaded: CoachOption | null = null;
+
+    for (const opt of options) {
+      this.checkAborted(signal);
+      this.onStateChange(AutomationState.ANALYZING_SEATS, `Checking coach ${opt.coachName} for ${need} seat(s) (${mode})...`);
+
+      const map = await this.loadCoach(opt, excluded, signal);
+      lastLoaded = opt;
+
+      if (!map) {
+        this.onLog(`Coach ${opt.coachName}: seat layout did not load, skipping.`, 'warning');
+        continue;
+      }
+
+      this.logCoach(map);
+
+      const strict = SeatSelectionEngine.selectSeats([map], need, mode, false);
+      if (strict.success && strict.seats.length === need) {
+        this.onLog(`Coach ${opt.coachName} satisfies mode '${mode}'.`, 'success');
+        return { coachName: opt.coachName, seats: strict.seats, modeUsed: strict.modeUsed };
+      }
+
+      this.onLog(`Coach ${opt.coachName} cannot satisfy mode '${mode}' for ${need} seat(s).`, 'info');
+      scanned.push({ opt, map });
+    }
+
+    if (!scanned.length) {
+      return this.fail('Could not read the seat layout of any coach.', 'Seat map was not loaded.');
+    }
+
+    if (!allowFallback) {
+      return this.fail(
+        `No coach has ${need} seat(s) in mode '${mode}' and fallback is disabled.`,
+        `No coach can satisfy mode '${mode}' for ${need} seat(s).`
+      );
+    }
+
+    // ── Fallback: pick the coach with the closest arrangement ──────────────
+    const ranked = scanned
+      .map(s => ({ ...s, res: SeatSelectionEngine.selectSeats([s.map], need, mode, true) }))
+      .filter(r => r.res.success && r.res.seats.length === need)
+      .sort((a, b) => SeatSelectionEngine.rankResult(a.res) - SeatSelectionEngine.rankResult(b.res));
+
+    if (!ranked.length) {
+      return this.fail(`No coach has ${need} usable seat(s).`, `Not enough ${this.settings.seatClass} seats available.`);
+    }
+
+    const best = ranked[0];
+    this.onLog(
+      `Mode '${mode}' not available anywhere — falling back: coach ${best.opt.coachName}, ${best.res.modeUsed} (${best.res.reason || 'closest match'}).`,
+      'warning'
+    );
+
+    if (lastLoaded && best.opt.index !== lastLoaded.index) {
+      const map = await this.loadCoach(best.opt, excluded, signal);
+      if (!map) return this.fail(`Could not reload coach ${best.opt.coachName}.`, 'Seat map was not loaded.');
+      const res = SeatSelectionEngine.selectSeats([map], need, mode, true);
+      if (!res.success || res.seats.length !== need) {
+        return this.fail(`Seat selection failed: ${res.reason}`, res.reason || 'Seat selection failed.');
+      }
+      return { coachName: best.opt.coachName, seats: res.seats, modeUsed: res.modeUsed, reason: res.reason };
+    }
+
+    return { coachName: best.opt.coachName, seats: best.res.seats, modeUsed: best.res.modeUsed, reason: best.res.reason };
+  }
+
+  /** Did clicking `seat` visibly change it (selected class / any attribute)? Polls ~600ms. */
+  private async confirmSeatClicked(seat: SeatInfo, htmlBefore: string, signal: AbortSignal): Promise<boolean> {
+    for (let i = 0; i < 6; i++) {
+      await this.delay(100, signal);
+
+      const fresh = this.findFreshSeat(seat);
+      if (fresh && fresh.isSelected && !seat.isSelected) return true;
+
+      const el = this.resolveSeatElement(seat);
+      if (el && el.outerHTML !== htmlBefore) return true;
+    }
+    return false;
+  }
+
+  /** Click each seat and verify it really changed. Returns which seats worked / failed. */
+  private async clickSeats(
+    seats: SeatInfo[],
+    signal: AbortSignal
+  ): Promise<{ confirmed: SeatInfo[]; failed: SeatInfo[] }> {
+    const confirmed: SeatInfo[] = [];
+    const failed: SeatInfo[] = [];
+
+    for (const seat of seats) {
       this.checkAborted(signal);
 
-      const el = seat.rawElement as HTMLElement | null | undefined;
-      if (!el) continue;
+      let el = this.resolveSeatElement(seat);
+      if (!el) {
+        this.onLog(`Seat ${seat.name}: element not found on page.`, 'warning');
+        failed.push(seat);
+        continue;
+      }
 
-      const classBefore = (el.getAttribute('class') || '');
+      const before = el.outerHTML;
       el.click();
-      await this.delay(150, signal);
+      let ok = await this.confirmSeatClicked(seat, before, signal);
 
-      if ((el.getAttribute('class') || '') === classBefore) {
-        // Informational only — we deliberately do NOT re-click (a 2nd click could deselect it).
-        this.onLog(`Seat ${seat.name}: no visible change after click (may be normal for this layout).`, 'warning');
+      if (!ok) {
+        // Nothing changed at all → the click was swallowed; try once more (safe: no state change seen)
+        el = this.resolveSeatElement(seat);
+        if (el && el.outerHTML === before) {
+          el.click();
+          ok = await this.confirmSeatClicked(seat, before, signal);
+        }
+      }
+
+      if (ok) {
+        confirmed.push(seat);
+      } else {
+        this.onLog(`Seat ${seat.name}: click did not select it (taken by someone else?).`, 'warning');
+        failed.push(seat);
       }
     }
 
+    return { confirmed, failed };
+  }
+
+  /**
+   * Plan → click → verify. If any seat cannot be selected the ones already selected are
+   * released and a new plan is made without the failed seats (max 3 rounds).
+   * Returns the selected seats, or null (error already reported).
+   */
+  private async chooseAndSelectSeats(signal: AbortSignal): Promise<SeatInfo[] | null> {
+    const need = this.seatCount;
+    const excluded = new Set<string>();
+    const maxRounds = 3;
+
+    for (let round = 1; round <= maxRounds; round++) {
+      this.checkAborted(signal);
+      this.onStateChange(
+        AutomationState.ANALYZING_SEATS,
+        `Finding best ${need} ${this.settings.seatClass} seat(s) — mode '${this.settings.seatMode}' (round ${round}/${maxRounds})...`
+      );
+
+      const plan = await this.planBestSeats(excluded, signal);
+      if (!plan) return null;
+
+      this.onLog(
+        `Selecting ${plan.seats.length} seat(s) in coach ${plan.coachName} [${plan.modeUsed}${plan.reason ? ' — ' + plan.reason : ''}]: ${plan.seats.map(s => s.name).join(', ')}`,
+        'success'
+      );
+
+      const { confirmed, failed } = await this.clickSeats(plan.seats, signal);
+
+      if (failed.length === 0 && confirmed.length === need) {
+        return confirmed;
+      }
+
+      // Never continue with a partial selection: release what we got, exclude failures, re-plan.
+      this.onLog(
+        `Only ${confirmed.length}/${need} seat(s) could be selected (round ${round}/${maxRounds}). Releasing them and re-planning...`,
+        'warning'
+      );
+      for (const seat of confirmed) {
+        const el = this.resolveSeatElement(seat);
+        if (el) el.click();
+        await this.delay(120, signal);
+      }
+      failed.forEach(s => excluded.add(s.id));
+    }
+
+    return this.fail(
+      `Could not select exactly ${need} seat(s) after ${maxRounds} attempts. No checkout action was performed.`,
+      `Could not select exactly ${need} seat(s).`
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // STEP 7 — Continue + final safety checks
+  // ══════════════════════════════════════════════════════════════════════════
+
+  private async continueToNextStep(selectedCount: number, signal: AbortSignal): Promise<void> {
     await this.delay(this.settings.actionDelay, signal);
 
     // Wait (up to 5s) for the Continue button to exist AND be enabled.
@@ -566,10 +795,8 @@ export class AutomationEngine {
     }
 
     continueBtn.click();
-
     this.onLog(`Continue clicked with ${selectedCount} ${this.settings.seatClass} seat(s).`, 'success');
 
-    // ── Final safety halt check (CAPTCHA / OTP / payment) ────────────────
     // Give the next screen up to ~4s to show a halt condition BEFORE declaring completion.
     for (let i = 0; i < 8; i++) {
       this.checkAborted(signal);

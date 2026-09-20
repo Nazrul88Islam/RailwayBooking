@@ -1,6 +1,15 @@
 import { RAILWAY_SELECTORS } from './selectors';
 import { BookingSettings } from '../../shared/types';
 
+/** One real entry of the "Select Coach" dropdown, e.g. "GA - 17 Seat(s)". */
+export interface CoachOption {
+  index: number;
+  value: string;
+  label: string;
+  coachName: string;
+  available: number;
+}
+
 /** Parsed form of the "target train" text the user typed (name and/or number). */
 export interface TargetTrainQuery {
   number: string;
@@ -920,93 +929,86 @@ export class RailwayAdapter {
     return this.findCoachSelect() !== null;
   }
 
+  /** "GA (20 Available)", "GA - 20 Seat(s)", "GA - 20 Seats", "GA (20)" → 20 */
+  private static parseAvailableCount(optionText: string): number {
+    const text = optionText.trim().toUpperCase();
+    const matches = [
+      text.match(/(\d+)\s*AVAILABLE/i),
+      text.match(/(\d+)\s*SEAT/i),
+      text.match(/\(\s*(\d+)\s*\)/),
+      text.match(/[-:]\s*(\d+)/)
+    ];
+    for (const match of matches) {
+      if (match) return parseInt(match[1], 10);
+    }
+    return 0;
+  }
+
   /**
-   * Find "Select Coach" dropdown on seat map view and automatically select a coach that has
-   * at least `requiredSeats` available seats (the one with the most seats wins).
+   * All real coach entries of the "Select Coach" dropdown, e.g.
+   *   "GA - 17 Seat(s)" → { coachName: 'GA', available: 17 }
+   * Placeholder ("Select Coach") and empty (0 seat) entries are skipped.
+   * coachName is derived exactly like SeatMapParser does, so the two always agree.
+   */
+  public static getCoachOptions(): CoachOption[] {
+    const sel = this.findCoachSelect();
+    if (!sel) return [];
+
+    const result: CoachOption[] = [];
+    Array.from(sel.options).forEach((option, index) => {
+      const label = (option.text || option.value || '').trim();
+      const text = label.toUpperCase();
+      if (!text) return;
+      if (text.includes('SELECT') || text.includes('CHOOSE') || text.includes('OPTION')) return;
+
+      const available = this.parseAvailableCount(text);
+      if (available <= 0) return;
+
+      const coachName = text.split('(')[0].split('-')[0].replace(/SEAT.*/i, '').trim();
+      result.push({ index, value: option.value, label, coachName, available });
+    });
+    return result;
+  }
+
+  public static getSelectedCoachIndex(): number {
+    const sel = this.findCoachSelect();
+    return sel ? sel.selectedIndex : -1;
+  }
+
+  /** Switch the coach dropdown to the given option (matched by index — values can collide). */
+  public static selectCoachOption(option: CoachOption): boolean {
+    const sel = this.findCoachSelect();
+    if (!sel || !sel.options[option.index]) return false;
+
+    if (sel.selectedIndex === option.index) return true;
+
+    sel.focus();
+    this.setSelectValue(sel, option.value);
+
+    // setSelectValue matches loosely (substring); force the exact option if it picked another one
+    if (sel.selectedIndex !== option.index) {
+      sel.selectedIndex = option.index;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      sel.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    return sel.selectedIndex === option.index;
+  }
+
+  /**
+   * Select the coach with the most seats that still has at least `requiredSeats`.
+   * (Kept for backwards compatibility; the engine now scans coaches with getCoachOptions().)
    */
   public static selectBestCoachFromDropdown(
     requiredSeats: number = 1
   ): boolean {
-    const coachSelectEl = this.findCoachSelect();
-
-    if (!coachSelectEl) {
-      console.warn('[Railway] Coach dropdown not found.');
-      return false;
-    }
-
-    const options = Array.from(coachSelectEl.options);
-
-    let bestOption: HTMLOptionElement | null = null;
-    let bestAvailable = -1;
-
-    for (const option of options) {
-      const text = (
-        option.text ||
-        option.value ||
-        ''
-      ).trim().toUpperCase();
-
-      if (!text) continue;
-
-      if (
-        text.includes('SELECT') ||
-        text.includes('CHOOSE') ||
-        text.includes('OPTION')
-      ) {
-        continue;
-      }
-
-      /*
-       * Examples:
-       *
-       * GA (20 Available)
-       * GA - 20 Seat(s)
-       * GA - 20 Seats
-       * GA (20)
-       */
-      const matches = [
-        text.match(/(\d+)\s*AVAILABLE/i),
-        text.match(/(\d+)\s*SEAT/i),
-        text.match(/\(\s*(\d+)\s*\)/),
-        text.match(/[-:]\s*(\d+)/)
-      ];
-
-      let available = 0;
-
-      for (const match of matches) {
-        if (match) {
-          available = parseInt(match[1], 10);
-          break;
-        }
-      }
-
-      if (available <= 0) {
-        continue;
-      }
-
-      console.log(`[Railway] Coach ${text}: ${available} available`);
-
-      if (available >= requiredSeats && available > bestAvailable) {
-        bestOption = option;
-        bestAvailable = available;
-      }
-    }
-
-    if (!bestOption) {
+    const options = this.getCoachOptions().filter(o => o.available >= requiredSeats);
+    if (!options.length) {
       console.warn(`[Railway] No coach has ${requiredSeats} available seat(s).`);
       return false;
     }
-
-    console.log(
-      `[Railway] Selecting coach "${bestOption.text}" with ${bestAvailable} available seat(s).`
-    );
-
-    if (coachSelectEl.value !== bestOption.value) {
-      coachSelectEl.focus();
-      this.setSelectValue(coachSelectEl, bestOption.value);
-    }
-
-    return true;
+    const best = options.reduce((a, b) => (b.available > a.available ? b : a));
+    console.log(`[Railway] Selecting coach "${best.label}" with ${best.available} available seat(s).`);
+    return this.selectCoachOption(best);
   }
 
   /**
