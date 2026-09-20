@@ -41,6 +41,27 @@ export class SeatRelationshipAnalyzer {
       }
     });
 
+    const getSeatNum = (name: string): number => {
+      const m = name.match(/\d+/);
+      return m ? parseInt(m[0], 10) : NaN;
+    };
+
+    // Rank groups so true consecutive numeric pairs (e.g. CHA-4 + CHA-5 for husband/wife) are prioritized first
+    validGroups.sort((gA, gB) => {
+      const numA1 = getSeatNum(gA[0].name);
+      const numA2 = getSeatNum(gA[gA.length - 1].name);
+      const isConsecutiveA = !isNaN(numA1) && !isNaN(numA2) && numA2 === numA1 + (gA.length - 1);
+
+      const numB1 = getSeatNum(gB[0].name);
+      const numB2 = getSeatNum(gB[gB.length - 1].name);
+      const isConsecutiveB = !isNaN(numB1) && !isNaN(numB2) && numB2 === numB1 + (gB.length - 1);
+
+      if (isConsecutiveA && !isConsecutiveB) return -1;
+      if (!isConsecutiveA && isConsecutiveB) return 1;
+
+      return gA[0].row - gB[0].row || gA[0].col - gB[0].col;
+    });
+
     return validGroups;
   }
 

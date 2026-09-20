@@ -168,7 +168,39 @@ describe('Seat Map Engine & Spatial Algorithms', () => {
     // Detect seats per row helper test for AC_B
     expect(SeatMapParser.detectSeatsPerRow('KHA_AC_B')).toBe(2);
   });
+
+  it('should prioritize true side-by-side adjacent pairs (CHA-4 + CHA-5) for husband & wife over cross-row seats', () => {
+    // Standard BD Railway chair coach layout (Row 1: 1, 2, 3; Row 2: 4, 5, 6, 7; Row 3: 8, 9, 10, 11)
+    const grid = [
+      ['CHA-1', 'CHA-2', 'CHA-3'],
+      ['CHA-4', 'CHA-5', 'CHA-6', 'CHA-7'],
+      ['CHA-8', 'CHA-9', 'CHA-10', 'CHA-11']
+    ];
+
+    const coach = SeatMapParser.createSyntheticCoach('CHA', grid);
+
+    // Request 2 adjacent seats
+    const result = SeatSelectionEngine.selectSeats([coach], 2, 'adjacent', true);
+    expect(result.success).toBe(true);
+    expect(result.modeUsed).toBe('adjacent');
+    
+    // The first pair in Row 1 is CHA-1 + CHA-2
+    expect(result.seats.map(s => s.name)).toEqual(['CHA-1', 'CHA-2']);
+
+    // Mark CHA-1, CHA-2, CHA-3 as booked so Row 2 is evaluated
+    coach.seats.find(s => s.name === 'CHA-1')!.isAvailable = false;
+    coach.seats.find(s => s.name === 'CHA-2')!.isAvailable = false;
+    coach.seats.find(s => s.name === 'CHA-3')!.isAvailable = false;
+
+    const row2Result = SeatSelectionEngine.selectSeats([coach], 2, 'adjacent', true);
+    expect(row2Result.success).toBe(true);
+    expect(row2Result.modeUsed).toBe('adjacent');
+
+    // MUST select CHA-4 + CHA-5 (side-by-side in same row) and NEVER CHA-4 + CHA-8
+    expect(row2Result.seats.map(s => s.name)).toEqual(['CHA-4', 'CHA-5']);
+  });
 });
+
 
 
 

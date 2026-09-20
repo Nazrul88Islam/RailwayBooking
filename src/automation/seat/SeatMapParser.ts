@@ -126,13 +126,14 @@ export class SeatMapParser {
       this.applyDOMSelectionState(el, isAvailable);
 
       const seatsPerRow = this.detectSeatsPerRow(coachName, container);
+      const defaultGrid = this.deriveGridFromSeatCode(seatName, index, seatsPerRow);
 
       const seat: SeatInfo = {
         id: `${coachName}_${seatName}`,
         name: seatName,
         coach: coachName,
-        row: Math.floor(index / seatsPerRow) + 1, // overwritten by geometry when available
-        col: (index % seatsPerRow) + 1,
+        row: defaultGrid.row,
+        col: defaultGrid.col,
         // ONLY "Available" seats are pickable. Booked / In Progress / already-Selected are not.
         isAvailable,
         isSelected: st.selected || st.active,
@@ -203,6 +204,55 @@ export class SeatMapParser {
       return 3;
     }
     return 4;
+  }
+
+  /**
+   * Derive stable row & column from seat number code when layout geometry is not available.
+   * Recognises BD Railway standard layouts (Row 1 has 3 seats: 1-2 left, 3 right; Row 2+ has 4 seats).
+   */
+  public static deriveGridFromSeatCode(seatName: string, index: number, seatsPerRow: number): { row: number; col: number } {
+    const match = seatName.match(/\d+/);
+    if (!match) {
+      return {
+        row: Math.floor(index / seatsPerRow) + 1,
+        col: (index % seatsPerRow) + 1
+      };
+    }
+
+    const num = parseInt(match[0], 10);
+
+    if (seatsPerRow === 4) {
+      // BD Railway standard chair car (Row 1: 1, 2, 3; Row 2+: 4,5,6,7 / 8,9,10,11 ...)
+      if (num === 1) return { row: 1, col: 1 };
+      if (num === 2) return { row: 1, col: 2 };
+      if (num === 3) return { row: 1, col: 4 };
+
+      if (num >= 4) {
+        const offset = (num - 4) % 4;
+        const r = 2 + Math.floor((num - 4) / 4);
+        const c = offset < 2 ? offset + 1 : offset + 2; // offset 0->col 1, 1->col 2, 2->col 4 (aisle gap), 3->col 5
+        return { row: r, col: c };
+      }
+    }
+
+    if (seatsPerRow === 3) {
+      // AC_S 3-berth layout (Row 1: 1, 2, 3; Row 2: 4, 5, 6 ...)
+      const r = Math.floor((num - 1) / 3) + 1;
+      const c = ((num - 1) % 3) + 1;
+      return { row: r, col: c };
+    }
+
+    if (seatsPerRow === 2) {
+      // AC_B 2-berth layout (Row 1: 1, 2; Row 2: 3, 4 ...)
+      const r = Math.floor((num - 1) / 2) + 1;
+      const c = ((num - 1) % 2) + 1;
+      return { row: r, col: c };
+    }
+
+    return {
+      row: Math.floor((num - 1) / seatsPerRow) + 1,
+      col: ((num - 1) % seatsPerRow) + 1
+    };
   }
 
   private static detectCoachName(container: HTMLElement | Document): string {
@@ -366,7 +416,7 @@ export class SeatMapParser {
 
     for (const it of sorted) {
       const last = rows[rows.length - 1];
-      if (last && Math.abs(it.rect.top - last.top) <= Math.max(4, medianH * 0.5)) {
+      if (last && Math.abs(it.rect.top - last.top) <= Math.max(12, medianH * 0.6)) {
         last.items.push(it);
       } else {
         rows.push({ top: it.rect.top, items: [it] });
