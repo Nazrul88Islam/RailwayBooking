@@ -24,7 +24,8 @@ export class SeatSelectionEngine {
     // Step 1: Attempt requested mode
     for (const coach of coaches) {
       const match = this.attemptModeInCoach(coach, targetCount, mode);
-      if (match && match.length === targetCount) {
+      const selectedCount = coach.seats.filter(s => s.isSelected).length;
+      if (match && (match.length === targetCount || (selectedCount > 0 && match.length + selectedCount === targetCount))) {
         return {
           success: true,
           seats: match,
@@ -126,6 +127,18 @@ export class SeatSelectionEngine {
     mode: SeatMode
   ): SeatInfo[] | null {
     const available = coach.seats.filter(s => s.isAvailable);
+    const selectedInCoach = coach.seats.filter(s => s.isSelected);
+
+    // If user already has pre-selected seat(s) in this coach, attempt to complete the pair/group
+    if (selectedInCoach.length > 0 && mode === 'adjacent') {
+      const groupsWithSelected = SeatRelationshipAnalyzer.findAdjacentSeats(coach, count, true);
+      const matchingGroup = groupsWithSelected.find(g => g.some(s => s.isSelected));
+      if (matchingGroup) {
+        // Return only the unselected/available seats in that adjacent group to click
+        const missing = matchingGroup.filter(s => !s.isSelected);
+        if (missing.length > 0) return missing;
+      }
+    }
 
     if (count === 1) {
       return available.length > 0 ? [available[0]] : null;

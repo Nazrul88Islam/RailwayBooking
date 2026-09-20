@@ -199,7 +199,29 @@ describe('Seat Map Engine & Spatial Algorithms', () => {
     // MUST select CHA-4 + CHA-5 (side-by-side in same row) and NEVER CHA-4 + CHA-8
     expect(row2Result.seats.map(s => s.name)).toEqual(['CHA-4', 'CHA-5']);
   });
+
+  it('should complete adjacent pair when user has pre-selected seat (UMA-1 pre-selected -> engine selects UMA-2)', () => {
+    const grid = [
+      ['UMA-1', 'UMA-2', 'UMA-3'],
+      ['UMA-4', 'UMA-5', 'UMA-6', 'UMA-7']
+    ];
+
+    const coach = SeatMapParser.createSyntheticCoach('UMA', grid);
+
+    // Simulate user having already clicked UMA-1 manually
+    const uma1 = coach.seats.find(s => s.name === 'UMA-1')!;
+    uma1.isSelected = true;
+    uma1.isAvailable = false;
+
+    // Engine looks for 2 adjacent seats in UMA where UMA-1 is pre-selected
+    const result = SeatSelectionEngine.selectSeats([coach], 2, 'adjacent', true);
+    expect(result.success).toBe(true);
+
+    // Engine should pick UMA-2 (the missing adjacent seat to complete UMA-1 + UMA-2 pair)
+    expect(result.seats.map(s => s.name)).toEqual(['UMA-2']);
+  });
 });
+
 
 
 

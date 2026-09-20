@@ -5,8 +5,8 @@ export class SeatRelationshipAnalyzer {
    * Find contiguous adjacent seats in the same physical row within a coach.
    * (col difference must be exactly 1, so seats on opposite sides of an aisle never qualify.)
    */
-  public static findAdjacentSeats(coach: CoachSeatMap, count: number): SeatInfo[][] {
-    const availableSeats = coach.seats.filter(s => s.isAvailable);
+  public static findAdjacentSeats(coach: CoachSeatMap, count: number, includeSelected: boolean = false): SeatInfo[][] {
+    const availableSeats = coach.seats.filter(s => s.isAvailable || (includeSelected && s.isSelected));
     const validGroups: SeatInfo[][] = [];
 
     // Group available seats by row

@@ -685,47 +685,6 @@ export class AutomationEngine {
     return false;
   }
 
-  /** Deselect any seats currently selected on the page (clears pre-existing shopping cart state across ALL coaches). */
-  private async clearAllSelectedSeats(signal: AbortSignal): Promise<void> {
-    this.onLog('Clearing pre-existing selected seat(s) from page cart...', 'info');
-
-    // 1. Target the right-hand panel "Seat Details" cart table (which holds seats from ALL coaches: GA, CHA, UMA, etc.)
-    const detailsContainers = Array.from(document.querySelectorAll(
-      '.seat-details, [class*="seat-details"], [class*="selected-seat"], .cart-details, #seat_details, [class*="seat-selection"]'
-    )) as HTMLElement[];
-
-    for (const container of detailsContainers) {
-      // Find all clickable seat items, remove links, or rows in the Seat Details table
-      const items = Array.from(container.querySelectorAll('tr, li, button, a, span, div')) as HTMLElement[];
-      for (const item of items) {
-        this.checkAborted(signal);
-        const txt = (item.textContent || '').toUpperCase();
-        // Match seat rows (e.g. "SNIGDHA GA-6 ৳ 685.00" or remove buttons)
-        if ((/\b[A-Z\u0980-\u09FF]{1,5}-\d{1,3}\b/.test(txt) && (txt.includes('৳') || txt.includes('TK') || txt.includes('BDT') || txt.includes('CLASS'))) ||
-            /REMOVE|DELETE|CLOSE|CLEAR|×|X/i.test(txt) ||
-            item.classList.contains('remove') || item.classList.contains('delete') || item.classList.contains('close')) {
-          try {
-            item.click();
-            await this.delay(100, signal);
-          } catch {}
-        }
-      }
-    }
-
-    // 2. Also deselect any selected seat elements rendered in the current coach grid
-    const maps = SeatMapParser.parseFromDOM(document);
-    const selectedSeats = maps.flatMap(m => m.seats).filter(s => s.isSelected);
-
-    for (const seat of selectedSeats) {
-      this.checkAborted(signal);
-      const el = this.resolveSeatElement(seat);
-      if (el) {
-        el.click();
-        await this.delay(120, signal);
-      }
-    }
-  }
-
   /** Click each seat and verify it really changed. Returns which seats worked / failed. */
   private async clickSeats(
     seats: SeatInfo[],
@@ -733,21 +692,6 @@ export class AutomationEngine {
   ): Promise<{ confirmed: SeatInfo[]; failed: SeatInfo[] }> {
     const confirmed: SeatInfo[] = [];
     const failed: SeatInfo[] = [];
-
-    // Clear any extra seats currently selected on the page that are not in the plan
-    const extraSelected = SeatMapParser.parseFromDOM(document)
-      .flatMap(m => m.seats)
-      .filter(s => s.isSelected && !seats.some(planSeat => planSeat.id === s.id));
-
-    for (const extra of extraSelected) {
-      this.checkAborted(signal);
-      const extraEl = this.resolveSeatElement(extra);
-      if (extraEl) {
-        this.onLog(`Deselecting un-planned seat ${extra.name} from page cart...`, 'info');
-        extraEl.click();
-        await this.delay(120, signal);
-      }
-    }
 
     for (const seat of seats) {
       this.checkAborted(signal);
@@ -807,9 +751,6 @@ export class AutomationEngine {
     const need = this.seatCount;
     const excluded = new Set<string>();
     const maxRounds = 3;
-
-    // Clear any pre-existing seat selections on page before starting target selection
-    await this.clearAllSelectedSeats(signal);
 
     for (let round = 1; round <= maxRounds; round++) {
       this.checkAborted(signal);
