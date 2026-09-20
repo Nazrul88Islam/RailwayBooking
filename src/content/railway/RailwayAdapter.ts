@@ -483,7 +483,7 @@ export class RailwayAdapter {
 
     if (target.number) {
       const re = new RegExp('(?<!\\d)(?<!\\d[,.])' + target.number + '(?!\\d)(?![,.]\\d)');
-      return re.test(t);
+      if (re.test(t)) return true;
     }
 
     return target.tokens.length > 0 && target.tokens.every(tok => t.includes(tok));

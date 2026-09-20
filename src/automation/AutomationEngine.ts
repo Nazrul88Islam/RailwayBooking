@@ -691,9 +691,24 @@ export class AutomationEngine {
     for (const seat of seats) {
       this.checkAborted(signal);
 
+      // Verify seat is available according to SeatInfo metadata
+      if (!seat.isAvailable) {
+        this.onLog(`Seat ${seat.name}: unavailable (DOM selection disabled for this seat).`, 'warning');
+        failed.push(seat);
+        continue;
+      }
+
       let el = this.resolveSeatElement(seat);
       if (!el) {
         this.onLog(`Seat ${seat.name}: element not found on page.`, 'warning');
+        failed.push(seat);
+        continue;
+      }
+
+      // Verify live DOM element is selectable and not disabled/booked/in-progress
+      if (!SeatMapParser.canDOMSelect(el)) {
+        SeatMapParser.applyDOMSelectionState(el, false);
+        this.onLog(`Seat ${seat.name}: live DOM element shows disabled selection state. Cannot touch/select.`, 'warning');
         failed.push(seat);
         continue;
       }
@@ -705,7 +720,7 @@ export class AutomationEngine {
       if (!ok) {
         // Nothing changed at all → the click was swallowed; try once more (safe: no state change seen)
         el = this.resolveSeatElement(seat);
-        if (el && el.outerHTML === before) {
+        if (el && SeatMapParser.canDOMSelect(el) && el.outerHTML === before) {
           el.click();
           ok = await this.confirmSeatClicked(seat, before, signal);
         }

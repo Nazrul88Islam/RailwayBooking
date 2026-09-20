@@ -8,8 +8,8 @@ import { SeatInfo, CoachSeatMap } from './SeatTypes';
  * must never be treated as available. If the site uses class names that are not covered by
  * these patterns, add them here — this is the one place to tune.
  */
-const BOOKED_RE = /booked|occupied|sold|taken|unavailable|disabled|blocked/;
-const IN_PROGRESS_RE = /progress|pending|processing|on[-_ ]?hold|(^|[\s_-])hold(ing)?($|[\s_-])|reserved|locked/;
+const BOOKED_RE = /booked|occupied|sold|taken|unavailable|disabled|blocked|orange|bg-orange|booked-seat|disabled-seat/;
+const IN_PROGRESS_RE = /progress|pending|processing|on[-_ ]?hold|(^|[\s_-])hold(ing)?($|[\s_-])|reserved|locked|green|bg-green/;
 const SELECTED_RE = /(^|[\s_-])selected($|[\s_-])/;
 const ACTIVE_RE = /(^|[\s_-])(active|chosen|checked)($|[\s_-])/;
 const AVAILABLE_RE = /(^|[\s_-])available($|[\s_-])/;
@@ -34,6 +34,42 @@ interface Rect {
 }
 
 export class SeatMapParser {
+  /**
+   * Updates DOM attributes on page to reflect whether a seat element can be selected by DOM.
+   * If unavailable, sets attributes and classes marking disabled DOM selection.
+   */
+  public static applyDOMSelectionState(el: HTMLElement | Element, isAvailable: boolean): void {
+    if (!el || typeof el.setAttribute !== 'function') return;
+
+    if (!isAvailable) {
+      el.setAttribute('data-dom-selectable', 'false');
+      el.setAttribute('aria-disabled', 'true');
+      if (el.classList) {
+        el.classList.add('dom-selection-disabled');
+      }
+    } else {
+      el.setAttribute('data-dom-selectable', 'true');
+      if (el.getAttribute('aria-disabled') === 'true' && !el.hasAttribute('disabled')) {
+        el.removeAttribute('aria-disabled');
+      }
+      if (el.classList) {
+        el.classList.remove('dom-selection-disabled');
+      }
+    }
+  }
+
+  /**
+   * Returns true if DOM can touch and select this seat element.
+   * Returns false if seat is unavailable, booked, in progress, selected, or marked disabled.
+   */
+  public static canDOMSelect(el: HTMLElement | Element): boolean {
+    if (!el) return false;
+    const domAttr = el.getAttribute('data-dom-selectable');
+    if (domAttr === 'false') return false;
+    const st = this.classify(el);
+    return !st.booked && !st.inProgress && !st.selected;
+  }
+
   /**
    * Parse seat elements from the live seat page (or a simulated DOM for unit tests).
    * Only the coach currently shown in the "Select Coach" dropdown is on the page, so the
@@ -84,16 +120,23 @@ export class SeatMapParser {
       };
 
       const st = this.classify(el);
+      const isAvailable = !st.booked && !st.inProgress && !st.selected;
+
+      // Update DOM element visual & attribute state for DOM selection
+      this.applyDOMSelectionState(el, isAvailable);
+
+      const seatsPerRow = this.detectSeatsPerRow(coachName, container);
 
       const seat: SeatInfo = {
         id: `${coachName}_${seatName}`,
         name: seatName,
         coach: coachName,
-        row: Math.floor(index / 4) + 1, // overwritten by geometry when available
-        col: (index % 4) + 1,
+        row: Math.floor(index / seatsPerRow) + 1, // overwritten by geometry when available
+        col: (index % seatsPerRow) + 1,
         // ONLY "Available" seats are pickable. Booked / In Progress / already-Selected are not.
-        isAvailable: !st.booked && !st.inProgress && !st.selected,
+        isAvailable,
         isSelected: st.selected || st.active,
+        canDOMSelect: isAvailable,
         xPos: rect.left,
         yPos: rect.top,
         rawElement: el
@@ -121,6 +164,46 @@ export class SeatMapParser {
   // ────────────────────────────────────────────────────────────────────────
   // Coach name
   // ────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Detect expected seats per row for fallback grid assignment based on coach name or seat class.
+   *  - AC_B / F_BERTH (First Berth / AC Berth): 2 seats per row
+   *  - AC_S (AC Seat / Sleeper 3-berth): 3 seats per row
+   *  - Standard Chair car (S_CHAIR, SNIGDHA, etc.): 4 seats per row
+   */
+  public static detectSeatsPerRow(coachName: string = '', container?: HTMLElement | Document | null): number {
+    const name = (coachName || '').toUpperCase();
+
+    let activeClass = '';
+    const targetDoc = container || (typeof document !== 'undefined' ? document : null);
+    if (targetDoc && typeof (targetDoc as any).querySelectorAll === 'function') {
+      const selectElements = Array.from((targetDoc as any).querySelectorAll('select')) as HTMLSelectElement[];
+      for (const sel of selectElements) {
+        const selectedOpt = sel.selectedOptions ? sel.selectedOptions[0] : sel.options[sel.selectedIndex];
+        if (selectedOpt) {
+          const txt = (selectedOpt.text || selectedOpt.value).toUpperCase();
+          if (txt.includes('AC_B') || txt.includes('AC B') || txt.includes('BERTH')) {
+            activeClass = 'AC_B';
+            break;
+          }
+          if (txt.includes('AC_S') || txt.includes('AC S')) {
+            activeClass = 'AC_S';
+            break;
+          }
+        }
+      }
+    }
+
+    const check = `${name} ${activeClass}`;
+
+    if (/AC[-_]?B|F[-_]?BERTH|BERTH|2[-_]?SEAT/i.test(check)) {
+      return 2;
+    }
+    if (/AC[-_]?S|SLEEPER|3[-_]?SEAT/i.test(check)) {
+      return 3;
+    }
+    return 4;
+  }
 
   private static detectCoachName(container: HTMLElement | Document): string {
     let name = 'COACH-1';
@@ -178,9 +261,9 @@ export class SeatMapParser {
     return this.normalizeCode(el.textContent, false);
   }
 
-  private static classify(el: Element) {
+  public static classify(el: Element) {
     const cls = (el.getAttribute('class') || '').toLowerCase();
-    const attrs = ['data-status', 'data-state', 'data-seat-status', 'title', 'data-original-title', 'aria-label']
+    const attrs = ['data-status', 'data-state', 'data-seat-status', 'title', 'data-original-title', 'aria-label', 'style', 'color']
       .map(a => (el.getAttribute(a) || '').toLowerCase())
       .join(' ');
     const all = `${cls} ${attrs}`.replace(/un-?selected|not[-_ ]selected/g, ' ');
@@ -188,7 +271,8 @@ export class SeatMapParser {
     const booked =
       BOOKED_RE.test(all) ||
       el.hasAttribute('disabled') ||
-      el.getAttribute('aria-disabled') === 'true';
+      el.getAttribute('aria-disabled') === 'true' ||
+      el.getAttribute('data-dom-selectable') === 'false';
 
     const inProgress = IN_PROGRESS_RE.test(all);
 

@@ -8,6 +8,7 @@ export interface SeatInfo {
   col: number;
   isAvailable: boolean;
   isSelected: boolean;
+  canDOMSelect?: boolean;
   xPos?: number;
   yPos?: number;
   rawElement?: any;
