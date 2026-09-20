@@ -106,10 +106,24 @@ export class AutomationEngine {
         ]) || RailwayAdapter.findElementByText('button', 'search');
 
         if (searchBtn) {
+          searchBtn.focus();
+          searchBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+          searchBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
           searchBtn.click();
         }
 
-        await this.delay(this.settings.actionDelay * 2, signal);
+        await this.delay(500, signal);
+
+        // If form click did not navigate to search results page, navigate directly via URL parameter format
+        if (!window.location.href.includes('/booking/train/search')) {
+          this.onLog(`Navigating directly to search results: ${this.settings.fromStation} → ${this.settings.toStation} (${this.settings.journeyDate})...`, 'info');
+          RailwayAdapter.navigateToSearchResults(
+            this.settings.fromStation,
+            this.settings.toStation,
+            this.settings.journeyDate,
+            this.settings.seatClass
+          );
+        }
       }
 
       // Step 5: Run Train Finding if on Search Results page or after homepage search

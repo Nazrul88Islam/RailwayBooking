@@ -147,6 +147,42 @@ export class RailwayAdapter {
   /**
    * Set journey date supporting React DatePickers, direct text inputs, and calendar overlays
    */
+  /**
+   * Format date string YYYY-MM-DD into DD-MMM-YYYY (e.g. 30-Sep-2026) for BD Railway URL
+   */
+  public static formatDojDate(dateStr: string): string {
+    const parts = dateStr.split('-');
+    if (parts.length < 3) return dateStr;
+
+    const [yearStr, monthStr, dayStr] = parts;
+    const monthNum = parseInt(monthStr, 10);
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthName = monthNames[monthNum - 1] || 'Sep';
+    const dayPadded = dayStr.padStart(2, '0');
+
+    return `${dayPadded}-${monthName}-${yearStr}`;
+  }
+
+  /**
+   * Direct navigation to search results URL if standard form submit is blocked or reloads home
+   */
+  public static navigateToSearchResults(
+    fromStation: string,
+    toStation: string,
+    journeyDate: string,
+    seatClass: string
+  ): void {
+    const formattedDate = this.formatDojDate(journeyDate);
+    const targetUrl = `https://eticket.railway.gov.bd/booking/train/search?fromcity=${encodeURIComponent(fromStation)}&tocity=${encodeURIComponent(toStation)}&doj=${encodeURIComponent(formattedDate)}&class=${encodeURIComponent(seatClass || 'SNIGDHA')}`;
+
+    if (!window.location.href.includes('/booking/train/search')) {
+      window.location.href = targetUrl;
+    }
+  }
+
+  /**
+   * Set journey date supporting React DatePickers, direct text inputs, and calendar overlays
+   */
   public static async selectJourneyDate(
     dateStr: string,
     baseDelayMs: number,
