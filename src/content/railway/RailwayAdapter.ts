@@ -1,7 +1,34 @@
 import { RAILWAY_SELECTORS } from './selectors';
 import { BookingSettings } from '../../shared/types';
 
+/** Parsed form of the "target train" text the user typed (name and/or number). */
+export interface TargetTrainQuery {
+  number: string;
+  tokens: string[];
+}
+
 export class RailwayAdapter {
+  /** Human-readable reason the last findAndSelectTargetTrain() call returned false (used for logging). */
+  public static lastFailureReason = '';
+
+  private static readonly TRAIN_CARD_SELECTOR =
+    '.single-train-details, .train-item, .train-card, .search-result-item, [class*="single-train"], [class*="train-item"]';
+
+  private static readonly CLICKABLE_SELECTOR =
+    'button, a, input[type="button"], input[type="submit"], [role="button"]';
+
+  /** All BD Railway class codes — used to tell which class a "Book" button belongs to. */
+  private static readonly KNOWN_CLASSES = [
+    'SNIGDHA', 'AC_S', 'AC_B', 'S_CHAIR', 'F_BERTH', 'F_SEAT', 'F_CHAIR', 'SHOVAN', 'SHULOV', 'AC_CHAIR'
+  ];
+
+  /** Elements we already clicked once to expand a card / class tab (never toggle twice). */
+  private static readonly expandedOnce = new WeakSet<HTMLElement>();
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Generic DOM helpers
+  // ────────────────────────────────────────────────────────────────────────
+
   /**
    * Find first matching DOM element from array of fallback selectors
    */
@@ -25,6 +52,34 @@ export class RailwayAdapter {
       }
     }
     return null;
+  }
+
+  private static normText(text: string | null | undefined): string {
+    return (text || '').replace(/\s+/g, ' ').trim();
+  }
+
+  private static escapeRegex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /** True unless the browser reports the element as hidden (display:none, etc). */
+  private static isVisible(el: HTMLElement): boolean {
+    const anyEl = el as any;
+    if (typeof anyEl.checkVisibility === 'function') {
+      try {
+        return !!anyEl.checkVisibility();
+      } catch {
+        return true;
+      }
+    }
+    return true;
+  }
+
+  private static isEnabled(el: HTMLElement): boolean {
+    if ((el as HTMLButtonElement).disabled) return false;
+    if (el.getAttribute('aria-disabled') === 'true') return false;
+    const cls = (el.getAttribute('class') || '').toLowerCase();
+    return !/(^|[\s_-])disabled($|[\s_-])/.test(cls);
   }
 
   /**
@@ -111,6 +166,20 @@ export class RailwayAdapter {
 
     return null;
   }
+
+  /**
+   * Heuristic: is the user being asked to log in? (URL check + a *visible* password field).
+   * Only used to produce a helpful error message — never to drive clicks.
+   */
+  public static detectLoginRequired(): boolean {
+    if (/\/(login|signin|sign-in|auth)(\/|$|\?)/i.test(window.location.pathname)) return true;
+    const pw = document.querySelector('input[type="password"]') as HTMLElement | null;
+    return !!pw && this.isVisible(pw);
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Homepage form helpers (unchanged behaviour)
+  // ────────────────────────────────────────────────────────────────────────
 
   /**
    * Select station from dropdown or autocomplete list
@@ -375,15 +444,126 @@ export class RailwayAdapter {
     return false;
   }
 
+  // ────────────────────────────────────────────────────────────────────────
+  // Target-train matching
+  // ────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Parse "KALNI EXPRESS", "KALNI EXPRESS (773)", "773", "773 - KALNI EXPRESS" …
+   */
+  public static parseTargetTrain(target: string): TargetTrainQuery {
+    const q = this.normText(target).toLowerCase();
+    const number = q.match(/\b\d{2,5}\b/)?.[0] || '';
+    const tokens = q
+      .replace(/\b\d{2,5}\b/g, ' ')
+      .replace(/\bexpress\b/g, ' ')
+      .split(/[\s\-–—()_,.&/]+/)
+      .filter(t => t.length >= 3);
+    return { number, tokens };
+  }
+
+  /**
+   * Does `text` describe the target train?
+   *  - If the user supplied a train number: the number must appear as a standalone number
+   *    (so "773" does NOT match "1,773" or "17730").
+   *  - Otherwise every name word must appear.
+   */
+  public static matchesTrain(text: string, target: TargetTrainQuery): boolean {
+    const t = this.normText(text).toLowerCase();
+    if (!t) return false;
+
+    if (target.number) {
+      const re = new RegExp('(?<!\\d)(?<!\\d[,.])' + target.number + '(?!\\d)(?![,.]\\d)');
+      return re.test(t);
+    }
+
+    return target.tokens.length > 0 && target.tokens.every(tok => t.includes(tok));
+  }
+
+  /** Number of distinct "(701)"-style train codes in a chunk of text. */
+  private static countTrainCodes(text: string): number {
+    const codes = new Set<string>();
+    const re = /\(\s*(\d{3})\s*\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text || '')) !== null) codes.add(m[1]);
+    return codes.size;
+  }
+
+  /**
+   * Find the DOM card for the target train.
+   *
+   * IMPORTANT: the old code took the FIRST element (in document order) matching the card
+   * selectors, which is the OUTERMOST one — often a wrapper around *all* trains. Here we pick
+   * the innermost match and then climb only as far as needed to reach the Book buttons, and
+   * never past an ancestor that contains another train.
+   */
+  private static findTrainCard(target: TargetTrainQuery): HTMLElement | null {
+    let anchors = (Array.from(document.querySelectorAll(this.TRAIN_CARD_SELECTOR)) as HTMLElement[])
+      .filter(el => this.matchesTrain(el.textContent || '', target));
+
+    // Fallback when the site uses different class names: any small element whose text matches.
+    if (!anchors.length) {
+      anchors = (Array.from(document.body.querySelectorAll('*')) as HTMLElement[]).filter(el => {
+        const txt = this.normText(el.textContent);
+        return txt.length > 0 && txt.length < 200 && this.matchesTrain(txt, target);
+      });
+    }
+
+    // Keep only innermost matches.
+    anchors = anchors.filter(a => !anchors.some(b => b !== a && a.contains(b)));
+
+    const hasBookingBtn = (el: HTMLElement) => this.getBookingCandidates(el).length > 0;
+
+    // Pass 1: highest ancestor that still holds only ONE train and contains Book buttons.
+    for (const anchor of anchors) {
+      let el: HTMLElement | null = anchor;
+      let best: HTMLElement | null = null;
+      while (el && el !== document.body) {
+        if (this.countTrainCodes(el.textContent || '') > 1) break;
+        if (hasBookingBtn(el)) best = el;
+        el = el.parentElement;
+      }
+      if (best) return best;
+    }
+
+    // Pass 2: nearest ancestor with any Book button (class-row matching validates it later).
+    for (const anchor of anchors) {
+      let el: HTMLElement | null = anchor;
+      while (el && el !== document.body) {
+        if (hasBookingBtn(el)) return el;
+        el = el.parentElement;
+      }
+    }
+
+    // Nothing has a button (collapsed card?) — return the card itself so we can try expanding it.
+    return anchors[0] || null;
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Seat-class matching
+  // ────────────────────────────────────────────────────────────────────────
+
+  private static textMatchesClass(text: string, cls: string): boolean {
+    const up = this.normText(text).toUpperCase();
+    return this.getClassVariations(cls)
+      .filter(Boolean)
+      .some(v => new RegExp('(?<![A-Z0-9])' + this.escapeRegex(v) + '(?![A-Z0-9])').test(up));
+  }
+
+  private static sameClass(a: string, b: string): boolean {
+    const vb = new Set(this.getClassVariations(b).filter(Boolean));
+    return this.getClassVariations(a).filter(Boolean).some(v => vb.has(v));
+  }
+
   /**
    * Returns true if a candidate element has strong evidence it is a booking action button.
    * Evidence required: text or ARIA label must contain one of the booking intent keywords.
    * An element with no text, no aria-label, and no booking-related class is NOT accepted.
    */
   private static isBookingIntentElement(el: HTMLElement): boolean {
-    const text = (el.textContent || '').trim().toUpperCase();
+    const text = ((el.textContent || '') + ' ' + ((el as HTMLInputElement).value || '')).trim().toUpperCase();
     const ariaLabel = (el.getAttribute('aria-label') || '').toUpperCase();
-    const className = (el.className || '').toString().toUpperCase();
+    const className = (el.getAttribute('class') || '').toUpperCase();
 
     // Must carry explicit booking intent in text, aria-label, or class name
     const BOOKING_KEYWORDS = ['BOOK', 'PURCHASE', 'বুক', 'টিকেট', 'BUY', 'RESERVE'];
@@ -396,6 +576,9 @@ export class RailwayAdapter {
     // Reject navigation/UI text that isn't a booking action
     const EXCLUDE_KEYWORDS = ['DETAILS', 'VIEW', 'SCHEDULE', 'INFO', 'MORE', 'SHARE', 'PRINT', 'CANCEL', 'CLOSE'];
     if (EXCLUDE_KEYWORDS.some(kw => text === kw || ariaLabel === kw)) return false;
+
+    // Reject sold-out / already-booked labels
+    if (/SOLD|UNAVAILABLE|NOT AVAILABLE|BOOKED/.test(text)) return false;
 
     return true;
   }
@@ -413,6 +596,116 @@ export class RailwayAdapter {
       h === 'https://eticket.railway.gov.bd/' ||
       h === 'https://eticket.railway.gov.bd/#') return false;
     if (h.startsWith('https://eticket.railway.gov.bd/?') || h.startsWith('/?')) return false;
+    return true;
+  }
+
+  /** All visible booking-intent buttons/links inside a container (enabled or not). */
+  private static getBookingCandidates(container: HTMLElement): HTMLElement[] {
+    return (Array.from(container.querySelectorAll(this.CLICKABLE_SELECTOR)) as HTMLElement[]).filter(el =>
+      this.isBookingIntentElement(el) &&
+      this.isValidBookingHref(el) &&
+      this.isVisible(el)
+    );
+  }
+
+  /**
+   * Find the Book button that belongs to the requested seat class inside a train card.
+   *
+   * For every candidate button we climb its ancestors until the ancestor's text mentions a
+   * class name. That is the button's "class row". If the row mentions ONLY the requested class
+   * the button is ours. If it mentions another class (or several) the button is not ours.
+   *
+   * (The old code took the first element in document order that mentioned the class — usually a
+   * big wrapper holding every class row — and then clicked the first Book button inside it,
+   * which could be a different class.)
+   */
+  private static findClassBookButton(
+    card: HTMLElement,
+    seatClass: string
+  ): { button: HTMLElement | null; reason: string } {
+    const candidates = this.getBookingCandidates(card);
+    if (!candidates.length) {
+      return { button: null, reason: 'No Book button visible inside the train card (card may be collapsed or still loading)' };
+    }
+
+    const others = this.KNOWN_CLASSES.filter(k => !this.sameClass(k, seatClass));
+    let sawDisabled = false;
+
+    for (const btn of candidates) {
+      let node: HTMLElement | null = btn;
+      while (node) {
+        const text = node.textContent || '';
+        const hitsTarget = this.textMatchesClass(text, seatClass);
+        const hitsOther = others.some(k => this.textMatchesClass(text, k));
+
+        if (hitsTarget && !hitsOther) {
+          if (this.isEnabled(btn)) return { button: btn, reason: '' };
+          sawDisabled = true;
+          break;
+        }
+        if (hitsTarget || hitsOther) break; // belongs to another class, or a shared container
+        if (node === card) break;
+        node = node.parentElement;
+      }
+    }
+
+    if (sawDisabled) {
+      return { button: null, reason: `Book button for ${seatClass} is disabled (class sold out?)` };
+    }
+    return { button: null, reason: `No Book button found next to seat class '${seatClass}' in this train card` };
+  }
+
+  /**
+   * If the card has no usable Book button yet, try ONE click to expand it:
+   *   (a) a class tab/label whose text is exactly the requested class
+   *   (b) the train header (only when the card shows no Book buttons at all)
+   * Each element is clicked at most once so we never toggle a section closed again.
+   */
+  private static tryExpand(
+    card: HTMLElement,
+    seatClass: string,
+    target: TargetTrainQuery,
+    hasAnyBookingButton: boolean
+  ): boolean {
+    const safeToClick = (el: HTMLElement): boolean => {
+      if (this.expandedOnce.has(el)) return false;
+      const a = el.closest('a[href]');
+      if (a) {
+        const h = (a.getAttribute('href') || '').trim().toLowerCase();
+        if (h && h !== '#' && !h.startsWith('javascript')) return false; // would navigate away
+      }
+      return true;
+    };
+
+    const nodes = Array.from(card.querySelectorAll('*')) as HTMLElement[];
+    const variations = this.getClassVariations(seatClass).filter(Boolean);
+
+    // Always click the INNERMOST matching element (the one that owns the click handler);
+    // clicking an outer wrapper would not trigger listeners on its children.
+    const innermost = (list: HTMLElement[]): HTMLElement | null =>
+      list.find(a => !list.some(b => b !== a && a.contains(b))) || null;
+
+    let toClick: HTMLElement | null = innermost(
+      nodes.filter(el => {
+        const t = this.normText(el.textContent).toUpperCase();
+        return t.length > 0 && t.length <= 40 && variations.includes(t) && safeToClick(el);
+      })
+    );
+
+    if (!toClick && !hasAnyBookingButton) {
+      toClick = innermost(
+        nodes.filter(el => {
+          const t = this.normText(el.textContent);
+          return t.length > 0 && t.length <= 120 && this.matchesTrain(t, target) && safeToClick(el);
+        })
+      );
+    }
+
+    if (!toClick) return false;
+
+    this.expandedOnce.add(toClick);
+    console.log('[Railway] Expanding card/class tab by clicking:', toClick);
+    toClick.click();
     return true;
   }
 
@@ -459,15 +752,11 @@ export class RailwayAdapter {
   }
 
   /**
-   * Find target train card on search results page and click the seat class Book Now button.
+   * Find target train card on search results page and click the seat-class Book Now button.
    *
-   * Returns true if a booking-intent button was found and clicked.
-   * Does NOT verify post-click navigation — that is the responsibility of AutomationEngine.
-   *
-   * Priority order:
-   *   1. Button/link inside the matching seat-class sub-container with booking intent text + valid href
-   *   2. Any button/link inside the whole train card with booking intent text + valid href
-   *   -- NO generic "first button" fallback (too dangerous on React SPAs) --
+   * Returns true if the correct class's Book button was found and clicked.
+   * Returns false otherwise and sets RailwayAdapter.lastFailureReason.
+   * Does NOT verify post-click navigation — that is AutomationEngine's job.
    */
   public static async findAndSelectTargetTrain(
     targetTrain: string,
@@ -475,250 +764,45 @@ export class RailwayAdapter {
     baseDelayMs: number,
     signal?: AbortSignal
   ): Promise<boolean> {
-    console.log(
-      '[Railway] SEARCH PAGE DIAGNOSTICS',
-      {
+    this.lastFailureReason = '';
+
+    const target = this.parseTargetTrain(targetTrain);
+    console.log('[Railway] Target train:', { original: targetTrain, ...target, seatClass });
+
+    if (!target.number && !target.tokens.length) {
+      this.lastFailureReason = `Target train '${targetTrain}' has no usable name or number`;
+      return false;
+    }
+
+    const card = this.findTrainCard(target);
+
+    if (!card) {
+      this.lastFailureReason = `Train '${targetTrain}' not found on the page yet`;
+      console.warn('[Railway] ' + this.lastFailureReason, {
         url: window.location.href,
-        title: document.title,
-        bodyLength: document.body?.innerText?.length || 0,
-        bodyText: (document.body?.innerText || '').substring(0, 5000)
-      }
-    );
-
-    const query = targetTrain.trim().toLowerCase();
-
-    // Support:
-    // "KALNI EXPRESS"
-    // "KALNI EXPRESS (773)"
-    // "773"
-    // "773 - KALNI EXPRESS"
-    const trainNumberMatch = query.match(/\b\d{2,5}\b/);
-    const targetTrainNumber = trainNumberMatch?.[0] || '';
-
-    const targetTrainName = query
-      .replace(/\(\s*\d{2,5}\s*\)/g, '')
-      .replace(/\b\d{2,5}\b/g, '')
-      .replace(/\bexpress\b/gi, '')
-      .replace(/[-()]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    console.log('[Railway] Target train:', {
-      original: targetTrain,
-      number: targetTrainNumber,
-      name: targetTrainName,
-      seatClass
-    });
-
-    const trainCards = Array.from(document.querySelectorAll(
-      '.single-train-details, .train-item, .train-card, .search-result-item, [class*="single-train"], [class*="train-item"]'
-    )) as HTMLElement[];
-
-    if (!trainCards.length) {
-      console.warn(
-        '[Railway] No train cards found using current selectors.'
-      );
-
-      console.log(
-        '[Railway] All buttons:',
-        Array.from(document.querySelectorAll('button')).map((el, i) => ({
-          index: i,
-          text: el.textContent?.trim(),
-          className: el.className,
-          ariaLabel: el.getAttribute('aria-label')
-        }))
-      );
-
-      console.log(
-        '[Railway] All links:',
-        Array.from(document.querySelectorAll('a')).map((el, i) => ({
-          index: i,
-          text: el.textContent?.trim(),
-          href: el.getAttribute('href'),
-          className: el.className
-        }))
-      );
-
+        bodyText: (document.body?.innerText || '').substring(0, 2000)
+      });
       return false;
     }
 
-    let matchedCard: HTMLElement | null = null;
-
-    for (const card of trainCards) {
-      const cardText = (card.textContent || '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .toLowerCase();
-
-      const numberMatches =
-        !!targetTrainNumber &&
-        cardText.includes(targetTrainNumber);
-
-      const nameMatches =
-        !!targetTrainName &&
-        targetTrainName.length >= 3 &&
-        cardText.includes(targetTrainName);
-
-      // If both number and name are supplied, prefer a card
-      // containing both.
-      if (
-        targetTrainNumber &&
-        targetTrainName &&
-        numberMatches &&
-        nameMatches
-      ) {
-        matchedCard = card;
-        break;
-      }
-
-      // Number-only search
-      if (targetTrainNumber && numberMatches) {
-        matchedCard = card;
-        break;
-      }
-
-      // Name-only search
-      if (!targetTrainNumber && nameMatches) {
-        matchedCard = card;
-        break;
-      }
-    }
-
-    if (!matchedCard) {
-      console.warn(
-        `[Railway] Target train not found: ${targetTrain}`
-      );
-
-      return false;
-    }
-
-    console.log('[Railway] Target train card found:', matchedCard);
+    console.log('[Railway] Target train card found:', card);
 
     try {
-      matchedCard.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center'
-      });
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
     } catch {
-      matchedCard.scrollIntoView();
+      card.scrollIntoView();
     }
 
-    this.debugTrainCard(matchedCard);
+    this.debugTrainCard(card);
 
-    const classVariations = this.getClassVariations(seatClass);
-
-    /*
-     * Find the smallest DOM container that contains the requested
-     * seat class. This is important because searching the entire
-     * train card can accidentally select another class.
-     */
-    const elements = Array.from(
-      matchedCard.querySelectorAll('*')
-    ) as HTMLElement[];
-
-    let classContainer: HTMLElement | null = null;
-
-    for (const el of elements) {
-      const text = (el.textContent || '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .toUpperCase();
-
-      if (!text || text.length > 300) {
-        continue;
-      }
-
-      const matchesClass = classVariations.some(v =>
-        text === v ||
-        text.includes(v)
-      );
-
-      if (!matchesClass) {
-        continue;
-      }
-
-      const bookingCandidates = el.querySelectorAll(
-        'button, a, input[type="button"], input[type="submit"], [role="button"]'
-      );
-
-      if (bookingCandidates.length > 0) {
-        classContainer = el;
-        break;
-      }
-    }
-
-    let targetBookBtn: HTMLElement | null = null;
-
-    /*
-     * First priority:
-     * Book button inside requested class container.
-     */
-    if (classContainer) {
-      const candidates = Array.from(
-        classContainer.querySelectorAll(
-          'button, a, input[type="button"], input[type="submit"], [role="button"]'
-        )
-      ) as HTMLElement[];
-
-      for (const candidate of candidates) {
-        if (
-          this.isBookingIntentElement(candidate) &&
-          this.isValidBookingHref(candidate)
-        ) {
-          targetBookBtn = candidate;
-          break;
-        }
-      }
-    }
-
-    /*
-     * Second priority:
-     * Find a class-specific row/container directly.
-     */
-    if (!targetBookBtn) {
-      const containers = Array.from(
-        matchedCard.querySelectorAll(
-          'div, section, article, li, td, tr'
-        )
-      ) as HTMLElement[];
-
-      for (const container of containers) {
-        const text = (container.textContent || '')
-          .replace(/\s+/g, ' ')
-          .trim()
-          .toUpperCase();
-
-        if (!classVariations.some(v => text.includes(v))) {
-          continue;
-        }
-
-        const candidates = Array.from(
-          container.querySelectorAll(
-            'button, a, input[type="button"], input[type="submit"], [role="button"]'
-          )
-        ) as HTMLElement[];
-
-        for (const candidate of candidates) {
-          if (
-            this.isBookingIntentElement(candidate) &&
-            this.isValidBookingHref(candidate)
-          ) {
-            targetBookBtn = candidate;
-            break;
-          }
-        }
-
-        if (targetBookBtn) {
-          break;
-        }
-      }
-    }
+    const { button: targetBookBtn, reason } = this.findClassBookButton(card, seatClass);
 
     if (!targetBookBtn) {
-      console.warn(
-        `[Railway] Could not find Book button for ${seatClass} in ${targetTrain}`
-      );
-
+      const hasAny = this.getBookingCandidates(card).length > 0;
+      const soldOut = reason.includes('disabled');
+      const expanded = soldOut ? false : this.tryExpand(card, seatClass, target, hasAny);
+      this.lastFailureReason = reason + (expanded ? ' — clicked to expand, will retry' : '');
+      console.warn('[Railway] ' + this.lastFailureReason);
       return false;
     }
 
@@ -732,48 +816,58 @@ export class RailwayAdapter {
     });
 
     try {
-      targetBookBtn.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center'
-      });
+      targetBookBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
     } catch {
       targetBookBtn.scrollIntoView();
     }
 
-    await new Promise(resolve =>
-      setTimeout(resolve, Math.min(baseDelayMs, 300))
-    );
+    await new Promise(resolve => setTimeout(resolve, Math.min(baseDelayMs, 300)));
 
     if (signal?.aborted) {
       throw new Error('Automation aborted by user');
     }
 
     targetBookBtn.focus();
-
-    targetBookBtn.dispatchEvent(
-      new MouseEvent('mousedown', {
-        bubbles: true,
-        cancelable: true,
-        view: window
-      })
-    );
-
-    targetBookBtn.dispatchEvent(
-      new MouseEvent('mouseup', {
-        bubbles: true,
-        cancelable: true,
-        view: window
-      })
-    );
-
+    targetBookBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+    targetBookBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
     targetBookBtn.click();
 
-    console.log(
-      `[Railway] Book clicked for ${targetTrain} / ${seatClass}`
-    );
-
+    console.log(`[Railway] Book clicked for ${targetTrain} / ${seatClass}`);
     return true;
   }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Seat-map page helpers
+  // ────────────────────────────────────────────────────────────────────────
+
+  /** Seat layout container or coach dropdown is present in the DOM. */
+  public static isSeatMapVisible(): boolean {
+    const container = document.querySelector(
+      [
+        '.seat-layout',
+        '.seat-plan',
+        '#seat_map',
+        '[class*="seat-layout"]',
+        '[class*="seat-grid"]',
+        '[class*="coach-layout"]',
+        '.coach-seat-btn'
+      ].join(',')
+    );
+    if (container) return true;
+
+    return Array.from(document.querySelectorAll('select')).some(sel => {
+      const nameOrId = (sel.name || sel.id || sel.getAttribute('aria-label') || '').toLowerCase();
+      const txt = (sel.textContent || '').toUpperCase();
+      return (
+        nameOrId.includes('coach') ||
+        nameOrId.includes('bogey') ||
+        txt.includes('SEAT(S)') ||
+        txt.includes('SEATS AVAILABLE') ||
+        txt.includes('CHOICE COACH')
+      );
+    });
+  }
+
   /**
    * Click unselected coach tab/button to load coach seat grid
    */
@@ -792,17 +886,8 @@ export class RailwayAdapter {
     return false;
   }
 
-  /**
-   * Find "Select Coach" dropdown on seat map view and automatically select a coach with available seats
-   */
-  public static selectBestCoachFromDropdown(
-    requiredSeats: number = 1
-  ): boolean {
-    const selects = Array.from(
-      document.querySelectorAll('select')
-    );
-
-    let coachSelectEl: HTMLSelectElement | null = null;
+  private static findCoachSelect(): HTMLSelectElement | null {
+    const selects = Array.from(document.querySelectorAll('select'));
 
     for (const sel of selects) {
       const nameOrId = (
@@ -826,11 +911,23 @@ export class RailwayAdapter {
           txt.includes('BOGEY')
         );
 
-      if (looksLikeCoach) {
-        coachSelectEl = sel;
-        break;
-      }
+      if (looksLikeCoach) return sel;
     }
+    return null;
+  }
+
+  public static hasCoachDropdown(): boolean {
+    return this.findCoachSelect() !== null;
+  }
+
+  /**
+   * Find "Select Coach" dropdown on seat map view and automatically select a coach that has
+   * at least `requiredSeats` available seats (the one with the most seats wins).
+   */
+  public static selectBestCoachFromDropdown(
+    requiredSeats: number = 1
+  ): boolean {
+    const coachSelectEl = this.findCoachSelect();
 
     if (!coachSelectEl) {
       console.warn('[Railway] Coach dropdown not found.');
@@ -887,28 +984,16 @@ export class RailwayAdapter {
         continue;
       }
 
-      console.log(
-        `[Railway] Coach ${text}: ${available} available`
-      );
+      console.log(`[Railway] Coach ${text}: ${available} available`);
 
-      /*
-       * We want a coach that can satisfy the requested
-       * number of seats.
-       */
-      if (
-        available >= requiredSeats &&
-        available > bestAvailable
-      ) {
+      if (available >= requiredSeats && available > bestAvailable) {
         bestOption = option;
         bestAvailable = available;
       }
     }
 
     if (!bestOption) {
-      console.warn(
-        `[Railway] No coach has ${requiredSeats} available seat(s).`
-      );
-
+      console.warn(`[Railway] No coach has ${requiredSeats} available seat(s).`);
       return false;
     }
 
@@ -918,13 +1003,43 @@ export class RailwayAdapter {
 
     if (coachSelectEl.value !== bestOption.value) {
       coachSelectEl.focus();
-
-      this.setSelectValue(
-        coachSelectEl,
-        bestOption.value
-      );
+      this.setSelectValue(coachSelectEl, bestOption.value);
     }
 
     return true;
+  }
+
+  /**
+   * Find the Continue / Purchase button on the seat page. Text match first (most reliable),
+   * class-based selectors as fallback. Skips hidden and disabled buttons.
+   */
+  public static findContinueButton(): HTMLElement | null {
+    const all = Array.from(document.querySelectorAll(this.CLICKABLE_SELECTOR)) as HTMLElement[];
+    const usable = all.filter(el => this.isVisible(el) && this.isEnabled(el));
+
+    const labelOf = (el: HTMLElement) =>
+      (this.normText(el.textContent) + ' ' + ((el as HTMLInputElement).value || '')).toUpperCase();
+
+    for (const key of ['CONTINUE PURCHASE', 'CONTINUE', 'PURCHASE', 'PROCEED', 'CONFIRM']) {
+      const hit = usable.find(el => labelOf(el).includes(key));
+      if (hit) return hit;
+    }
+
+    const bySelector = [
+      '.btn-continue',
+      'button.continue-btn',
+      '.proceed-btn',
+      'button[type="submit"].btn-success',
+      '.purchase-btn',
+      '[class*="continue"]',
+      '[class*="purchase"]'
+    ];
+    for (const sel of bySelector) {
+      const el = Array.from(document.querySelectorAll(sel)).find(e =>
+        this.isVisible(e as HTMLElement) && this.isEnabled(e as HTMLElement)
+      );
+      if (el) return el as HTMLElement;
+    }
+    return null;
   }
 }
