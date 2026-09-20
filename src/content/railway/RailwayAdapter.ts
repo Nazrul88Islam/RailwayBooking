@@ -394,6 +394,14 @@ export class RailwayAdapter {
     }
 
     if (targetBookBtn) {
+      try {
+        targetBookBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } catch (e) {
+        targetBookBtn.scrollIntoView();
+      }
+      targetBookBtn.focus();
+      targetBookBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+      targetBookBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
       targetBookBtn.click();
       return true;
     }
@@ -426,10 +434,13 @@ export class RailwayAdapter {
     const selects = Array.from(document.querySelectorAll('select'));
     let coachSelectEl: HTMLSelectElement | null = null;
 
-    // Find select element containing coach options like "GA - 1 Seat(s)", "KHA - 0 Seat(s)"
+    // Find select element containing coach options like "GA ( 20 Available )", "KA - 1 Seat(s)", "KHA - 0 Seat(s)"
     for (const sel of selects) {
+      const nameOrId = (sel.name || sel.id || sel.getAttribute('aria-label') || '').toLowerCase();
       const optionTexts = Array.from(sel.options).map(o => (o.text || o.value).toUpperCase());
-      if (optionTexts.some(txt => txt.includes('SEAT(S)') || txt.includes('SEAT') || txt.includes('CHOICE'))) {
+      
+      if (nameOrId.includes('coach') || nameOrId.includes('bogey') ||
+          optionTexts.some(txt => txt.includes('SEAT') || txt.includes('COACH') || txt.includes('AVAILABLE') || txt.includes('CHOICE') || txt.includes('SELECT'))) {
         coachSelectEl = sel;
         break;
       }
@@ -442,27 +453,45 @@ export class RailwayAdapter {
     if (!coachSelectEl) return false;
 
     const options = Array.from(coachSelectEl.options);
-    let targetOpt: HTMLOptionElement | null = null;
+    if (options.length <= 1 && options[0]?.value === '') {
+      return false; // Options not loaded into DOM yet
+    }
 
-    // Search for coach option with enough available seats
+    let targetOpt: HTMLOptionElement | null = null;
+    let maxAvailable = -1;
+
     for (const opt of options) {
       const text = (opt.text || opt.value).toUpperCase();
-      const seatMatch = text.match(/(\d+)\s*SEAT/);
-      if (seatMatch) {
-        const availableCount = parseInt(seatMatch[1], 10);
-        if (availableCount >= requiredSeats) {
-          targetOpt = opt;
-          break;
-        } else if (availableCount > 0 && !targetOpt) {
-          targetOpt = opt;
-        }
+      if (text.includes('SELECT') || text.includes('CHOOSE') || text.includes('OPTION') || opt.value === '') {
+        continue;
+      }
+
+      // Extract seat count from text formats: "20 AVAILABLE", "20 SEATS", "(20)", "- 20"
+      const countMatch = text.match(/(\d+)\s*(?:SEAT|AVAILABLE|TICKET|\))/i) ||
+                         text.match(/\(\s*(\d+)\s*\)/) ||
+                         text.match(/[\-\:]\s*(\d+)/);
+
+      let availableCount = 0;
+      if (countMatch) {
+        availableCount = parseInt(countMatch[1], 10);
+      } else if (!text.includes('0 ') && !text.includes('NONE') && !text.includes('FULL') && !text.includes('UNAVAILABLE')) {
+        availableCount = 1;
+      }
+
+      if (availableCount >= requiredSeats && availableCount > maxAvailable) {
+        maxAvailable = availableCount;
+        targetOpt = opt;
+      } else if (availableCount > 0 && maxAvailable < requiredSeats && availableCount > maxAvailable) {
+        maxAvailable = availableCount;
+        targetOpt = opt;
       }
     }
 
+    // Fallback: Pick any non-placeholder option
     if (!targetOpt) {
       targetOpt = options.find(opt => {
         const text = (opt.text || opt.value).toUpperCase();
-        return !text.includes('0 SEAT') && !text.includes('SELECT') && !text.includes('CHOICE');
+        return opt.value !== '' && !text.includes('SELECT') && !text.includes('CHOOSE') && !text.includes('0 AVAIL') && !text.includes('0 SEAT');
       }) || null;
     }
 
@@ -472,6 +501,7 @@ export class RailwayAdapter {
       return true;
     }
 
-    return false;
+    return targetOpt !== null && coachSelectEl.value === targetOpt.value;
   }
 }
+
