@@ -31,6 +31,11 @@ export class RailwayAdapter {
    * Set input value triggering React native value setter & synthetic events
    */
   public static setInputValue(inputEl: HTMLInputElement, value: string): void {
+    const tracker = (inputEl as any)._valueTracker;
+    if (tracker) {
+      tracker.setValue('');
+    }
+
     const nativeSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype,
       'value'
@@ -56,11 +61,18 @@ export class RailwayAdapter {
     signal?: AbortSignal
   ): Promise<void> {
     inputEl.focus();
+    inputEl.click();
+
+    const tracker = (inputEl as any)._valueTracker;
+    if (tracker) {
+      tracker.setValue('');
+    }
 
     if (baseDelayMs <= 100) {
       // Ultra Fast Instant Mode
       this.setInputValue(inputEl, text);
       inputEl.dispatchEvent(new Event('focus', { bubbles: true }));
+      inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
       inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     } else {
       // Paced typing
@@ -124,7 +136,7 @@ export class RailwayAdapter {
     await new Promise(r => setTimeout(r, Math.min(baseDelayMs, 300)));
 
     // Click first suggestion if dropdown opened
-    const dropdownItem = document.querySelector('.select2-results__option, .autocomplete-item, .ui-menu-item, [class*="option"], [class*="suggestion"]');
+    const dropdownItem = document.querySelector('.select2-results__option, .autocomplete-item, .ui-menu-item, [class*="option"], [class*="suggestion"], [class*="autocomplete"] li');
     if (dropdownItem) {
       (dropdownItem as HTMLElement).click();
     }
@@ -203,6 +215,11 @@ export class RailwayAdapter {
    * Set HTMLSelectElement value triggering React native setter & events
    */
   public static setSelectValue(selectEl: HTMLSelectElement, value: string): void {
+    const tracker = (selectEl as any)._valueTracker;
+    if (tracker) {
+      tracker.setValue('');
+    }
+
     const nativeSetter = Object.getOwnPropertyDescriptor(
       window.HTMLSelectElement.prototype,
       'value'
@@ -214,8 +231,66 @@ export class RailwayAdapter {
       selectEl.value = value;
     }
 
+    Array.from(selectEl.options).forEach((opt, idx) => {
+      if (opt.value === value || opt.text === value || (value && opt.text.includes(value))) {
+        opt.selected = true;
+        opt.setAttribute('selected', 'selected');
+        selectEl.selectedIndex = idx;
+      } else {
+        opt.selected = false;
+        opt.removeAttribute('selected');
+      }
+    });
+
     selectEl.dispatchEvent(new Event('change', { bubbles: true }));
     selectEl.dispatchEvent(new Event('input', { bubbles: true }));
+    selectEl.dispatchEvent(new Event('blur', { bubbles: true }));
+
+    if (selectEl.form) {
+      selectEl.form.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+
+  /**
+   * Helper to normalize seat class variations (e.g. SNIGDHA, AC_S -> AC S, S_CHAIR -> S CHAIR)
+   */
+  public static getClassVariations(seatClass: string): string[] {
+    const raw = (seatClass || '').trim().toUpperCase();
+    const clean = raw.replace(/[^A-Z0-9]/g, '');
+    const set = new Set<string>([raw, clean]);
+
+    if (raw.includes('SNIGDHA') || clean.includes('SNIGDHA')) {
+      ['SNIGDHA', 'SNIGDA', 'SNIDGHA', 'SNGDHA'].forEach(s => set.add(s));
+    }
+    if (raw.includes('AC_S') || raw.includes('AC S') || clean === 'ACS') {
+      ['AC_S', 'AC S', 'AC_SEAT', 'AC SEAT', 'AC-S', 'ACS'].forEach(s => set.add(s));
+    }
+    if (raw.includes('AC_B') || raw.includes('AC B') || clean === 'ACB') {
+      ['AC_B', 'AC B', 'AC_BERTH', 'AC BERTH', 'AC-B', 'ACB'].forEach(s => set.add(s));
+    }
+    if (raw.includes('S_CHAIR') || raw.includes('S CHAIR') || clean === 'SCHAIR') {
+      ['S_CHAIR', 'S CHAIR', 'SHOVAN CHAIR', 'S-CHAIR', 'SCHAIR'].forEach(s => set.add(s));
+    }
+    if (raw.includes('F_BERTH') || clean === 'FBERTH') {
+      ['F_BERTH', 'F BERTH', 'FIRST BERTH', 'F-BERTH', 'FBERTH'].forEach(s => set.add(s));
+    }
+    if (raw.includes('F_SEAT') || clean === 'FSEAT') {
+      ['F_SEAT', 'F SEAT', 'FIRST SEAT', 'F-SEAT', 'FSEAT'].forEach(s => set.add(s));
+    }
+    if (raw.includes('F_CHAIR') || clean === 'FCHAIR') {
+      ['F_CHAIR', 'F CHAIR', 'FIRST CHAIR', 'F-CHAIR', 'FCHAIR'].forEach(s => set.add(s));
+    }
+    if (raw.includes('SHOVAN')) {
+      ['SHOVAN', 'SHOVAN_CHAIR'].forEach(s => set.add(s));
+    }
+    if (raw.includes('SHULOV')) {
+      ['SHULOV'].forEach(s => set.add(s));
+    }
+    if (raw.includes('AC_CHAIR') || clean === 'ACCHAIR') {
+      ['AC_CHAIR', 'AC CHAIR', 'ACCHAIR'].forEach(s => set.add(s));
+    }
+
+    return Array.from(set);
   }
 
   /**
@@ -232,7 +307,7 @@ export class RailwayAdapter {
     // Identify select element containing BD Railway class option values
     for (const sel of selects) {
       const optionTexts = Array.from(sel.options).map(o => (o.value || o.text).toUpperCase().trim());
-      if (optionTexts.some(txt => txt === 'AC_B' || txt === 'AC_S' || txt === 'SNIGDHA' || txt === 'S_CHAIR' || txt === 'F_BERTH' || txt.includes('CHOOSE A CLASS'))) {
+      if (optionTexts.some(txt => txt === 'AC_B' || txt === 'AC_S' || txt === 'SNIGDHA' || txt === 'S_CHAIR' || txt === 'F_BERTH' || txt.includes('CHOOSE A CLASS') || txt.includes('CLASS'))) {
         selectEl = sel;
         break;
       }
@@ -246,34 +321,20 @@ export class RailwayAdapter {
 
     if (!selectEl) return false;
 
-    const targetVal = className.trim().toUpperCase();
+    const variations = this.getClassVariations(className);
     const options = Array.from(selectEl.options);
     
     const targetOption = options.find(opt => {
       const v = (opt.value || '').trim().toUpperCase();
       const t = (opt.text || '').trim().toUpperCase();
-      return v === targetVal || t === targetVal || v.includes(targetVal) || t.includes(targetVal);
+      return variations.some(varStr => v === varStr || t === varStr || v.includes(varStr) || t.includes(varStr));
     });
 
     if (targetOption) {
       selectEl.focus();
-      
-      // Mark target option as selected
-      options.forEach(o => (o.selected = false));
-      targetOption.selected = true;
-      selectEl.selectedIndex = targetOption.index;
+      selectEl.click();
 
       this.setSelectValue(selectEl, targetOption.value || targetOption.text);
-
-      // Dispatch full event suite
-      selectEl.dispatchEvent(new Event('change', { bubbles: true }));
-      selectEl.dispatchEvent(new Event('input', { bubbles: true }));
-      selectEl.dispatchEvent(new Event('blur', { bubbles: true }));
-
-      if (selectEl.form) {
-        selectEl.form.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-
       return selectEl.selectedIndex !== 0;
     }
 
@@ -359,7 +420,7 @@ export class RailwayAdapter {
     }
 
     // 4. Search for class sub-blocks & BOOK NOW button inside the target train card
-    const targetClassQuery = seatClass.toUpperCase().trim();
+    const variations = this.getClassVariations(seatClass);
     const allButtons = Array.from(matchedCard.querySelectorAll('button, a, input[type="button"], input[type="submit"], .btn-book-now, [class*="book"]'));
     const bookButtons = allButtons.filter(btn => {
       const text = (btn.textContent || (btn as HTMLInputElement).value || '').toUpperCase();
@@ -372,9 +433,9 @@ export class RailwayAdapter {
     for (const btn of bookButtons) {
       let parent: HTMLElement | null = btn.parentElement;
       let depth = 0;
-      while (parent && parent !== matchedCard && depth < 4) {
+      while (parent && parent !== matchedCard && depth < 5) {
         const text = (parent.textContent || '').toUpperCase();
-        if (text.includes(targetClassQuery)) {
+        if (variations.some(varStr => text.includes(varStr))) {
           targetBookBtn = btn as HTMLElement;
           break;
         }

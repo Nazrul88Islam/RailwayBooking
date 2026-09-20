@@ -21,15 +21,30 @@ export class AutomationEngine {
   }
 
   private detectCurrentPageType(): 'HOMEPAGE' | 'SEARCH_RESULTS' | 'SEAT_MAP' {
-    if (document.querySelector('.seat-layout, .seat-plan, #seat_map, [class*="seat-layout"], [class*="seat-grid"], select[name*="coach"], select')) {
-      const selectTexts = Array.from(document.querySelectorAll('select')).map(s => s.textContent || '');
-      if (selectTexts.some(t => t.includes('Seat(s)')) || document.querySelector('.seat-layout, [class*="seat"]')) {
-        return 'SEAT_MAP';
-      }
+    // 1. Check for active Seat Map layout or Coach selection dropdown
+    const seatMapContainer = document.querySelector(
+      '.seat-layout, .seat-plan, #seat_map, [class*="seat-layout"], [class*="seat-grid"], [class*="coach-layout"], .coach-seat-btn'
+    );
+    const hasCoachDropdown = Array.from(document.querySelectorAll('select')).some(sel => {
+      const nameOrId = (sel.name || sel.id || '').toLowerCase();
+      const txt = (sel.textContent || '').toUpperCase();
+      return (nameOrId.includes('coach') || nameOrId.includes('bogey')) ||
+             txt.includes('SEAT(S)') || txt.includes('SEATS AVAILABLE') || txt.includes('CHOICE COACH');
+    });
+
+    if (seatMapContainer || hasCoachDropdown) {
+      return 'SEAT_MAP';
     }
-    if (document.querySelectorAll('.train-item, .train-card, .single-train-details, [class*="single-train"]').length > 0) {
+
+    // 2. Check for Train Search Results cards
+    const trainCards = document.querySelectorAll(
+      '.train-item, .train-card, .single-train-details, .search-result-item, [class*="single-train"], [class*="train-item"]'
+    );
+    if (trainCards.length > 0) {
       return 'SEARCH_RESULTS';
     }
+
+    // 3. Otherwise, HOMEPAGE or search form context
     return 'HOMEPAGE';
   }
 
