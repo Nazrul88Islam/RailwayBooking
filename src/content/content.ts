@@ -38,6 +38,15 @@ const startAutomationEngine = (settings: BookingSettings) => {
 
 // Check if background worker has an active running automation state on new page load
 chrome.runtime.sendMessage({ type: MessageType.GET_STATE }, (response) => {
+  console.log(
+    '🚆 [Railway] GET_STATE after page load:',
+    {
+      url: window.location.href,
+      state: response?.state,
+      settings: response?.settings
+    }
+  );
+
   if (response && response.state && response.settings) {
     const activeStates = [
       AutomationState.STARTING,

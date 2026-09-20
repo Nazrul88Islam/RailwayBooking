@@ -20,32 +20,135 @@ export class AutomationEngine {
     this.onLog = onLog;
   }
 
+  /**
+   * Detect the current page type by inspecting the live DOM and URL.
+   * Always call at the point of use — never cache the result across navigations.
+   */
   private detectCurrentPageType(): 'HOMEPAGE' | 'SEARCH_RESULTS' | 'SEAT_MAP' {
-    // 1. Check for active Seat Map layout or Coach selection dropdown
-    const seatMapContainer = document.querySelector(
-      '.seat-layout, .seat-plan, #seat_map, [class*="seat-layout"], [class*="seat-grid"], [class*="coach-layout"], .coach-seat-btn'
-    );
-    const hasCoachDropdown = Array.from(document.querySelectorAll('select')).some(sel => {
-      const nameOrId = (sel.name || sel.id || '').toLowerCase();
-      const txt = (sel.textContent || '').toUpperCase();
-      return (nameOrId.includes('coach') || nameOrId.includes('bogey')) ||
-             txt.includes('SEAT(S)') || txt.includes('SEATS AVAILABLE') || txt.includes('CHOICE COACH');
+    const url = window.location.href.toLowerCase();
+    const pathname = window.location.pathname.toLowerCase();
+
+    console.log('[Railway] Detecting page type:', {
+      url,
+      pathname
     });
 
-    if (seatMapContainer || hasCoachDropdown) {
-      return 'SEAT_MAP';
-    }
-
-    // 2. Check for Train Search Results cards
-    const trainCards = document.querySelectorAll(
-      '.train-item, .train-card, .single-train-details, .search-result-item, [class*="single-train"], [class*="train-item"]'
-    );
-    if (trainCards.length > 0) {
+    // ============================================================
+    // 1. SEARCH RESULTS URL HAS HIGHEST PRIORITY
+    // ============================================================
+    if (
+      pathname === '/booking/train/search' ||
+      url.includes('/booking/train/search')
+    ) {
+      console.log('[Railway] Page detected: SEARCH_RESULTS (URL)');
       return 'SEARCH_RESULTS';
     }
 
-    // 3. Otherwise, HOMEPAGE or search form context
+    // ============================================================
+    // 2. SEAT / BOOKING PAGE URL
+    // ============================================================
+    if (
+      url.includes('/booking/seat') ||
+      url.includes('/seat-selection') ||
+      url.includes('/booking/train/booking')
+    ) {
+      console.log('[Railway] Page detected: SEAT_MAP (URL)');
+      return 'SEAT_MAP';
+    }
+
+    // ============================================================
+    // 3. SEAT MAP DOM
+    // ============================================================
+    const seatMapContainer = document.querySelector(
+      [
+        '.seat-layout',
+        '.seat-plan',
+        '#seat_map',
+        '[class*="seat-layout"]',
+        '[class*="seat-grid"]',
+        '[class*="coach-layout"]',
+        '.coach-seat-btn'
+      ].join(',')
+    );
+
+    const hasCoachDropdown = Array.from(
+      document.querySelectorAll('select')
+    ).some(sel => {
+      const nameOrId = (
+        sel.name ||
+        sel.id ||
+        sel.getAttribute('aria-label') ||
+        ''
+      ).toLowerCase();
+
+      const txt = (sel.textContent || '').toUpperCase();
+
+      return (
+        nameOrId.includes('coach') ||
+        nameOrId.includes('bogey') ||
+        txt.includes('SEAT(S)') ||
+        txt.includes('SEATS AVAILABLE') ||
+        txt.includes('CHOICE COACH')
+      );
+    });
+
+    if (seatMapContainer || hasCoachDropdown) {
+      console.log('[Railway] Page detected: SEAT_MAP (DOM)');
+      return 'SEAT_MAP';
+    }
+
+    // ============================================================
+    // 4. SEARCH RESULTS DOM
+    // ============================================================
+    const trainCards = document.querySelectorAll(
+      [
+        '.train-item',
+        '.train-card',
+        '.single-train-details',
+        '.search-result-item',
+        '[class*="single-train"]',
+        '[class*="train-item"]'
+      ].join(',')
+    );
+
+    if (trainCards.length > 0) {
+      console.log(
+        `[Railway] Page detected: SEARCH_RESULTS (${trainCards.length} train card(s))`
+      );
+
+      return 'SEARCH_RESULTS';
+    }
+
+    // ============================================================
+    // 5. OTHER BOOKING/TRAIN URL
+    // ============================================================
+    if (url.includes('/booking/train')) {
+      console.log('[Railway] Page detected: SEARCH_RESULTS (booking URL)');
+      return 'SEARCH_RESULTS';
+    }
+
+    // ============================================================
+    // 6. HOMEPAGE
+    // ============================================================
+    console.log('[Railway] Page detected: HOMEPAGE');
+
     return 'HOMEPAGE';
+  }
+
+  /**
+   * Return true if the current URL indicates the Railway homepage (not search or booking pages)
+   */
+  private isHomePage(): boolean {
+    const url = window.location.href;
+    return (
+      url === 'https://eticket.railway.gov.bd/' ||
+      url === 'https://eticket.railway.gov.bd' ||
+      url === 'https://eticket.railway.gov.bd/#' ||
+      (url.startsWith('https://eticket.railway.gov.bd') &&
+        !url.includes('/booking') &&
+        !url.includes('/seat') &&
+        !url.includes('/train'))
+    );
   }
 
   public async start(): Promise<void> {
@@ -56,20 +159,36 @@ export class AutomationEngine {
       this.onLog('Automation engine initialized', 'info');
       this.onStateChange(AutomationState.STARTING, 'Starting booking process...');
 
-      // Step 1: Safety check before doing anything
+      // ── STEP 1: Safety check ──────────────────────────────────────────────
       const safetyHalt = RailwayAdapter.detectSafetyHalt();
       if (safetyHalt) {
         this.handleSafetyHalt(safetyHalt);
         return;
       }
 
-      const pageType = this.detectCurrentPageType();
-      this.onLog(`Detected current page context: ${pageType}`, 'info');
+      // ── STEP 2: Homepage form fill & search ───────────────────────────────
+      const currentUrl = window.location.href.toLowerCase();
 
-      // Step 2, 3, 4: Only run Homepage search steps if currently on Homepage
-      if (pageType === 'HOMEPAGE') {
+      const isSearchResultsUrl =
+        currentUrl.includes('/booking/train/search');
+
+      const isSeatMapUrl =
+        currentUrl.includes('/booking/seat') ||
+        currentUrl.includes('/seat-selection');
+
+      const isRailwayHomepage =
+        !isSearchResultsUrl &&
+        !isSeatMapUrl &&
+        (
+          currentUrl === 'https://eticket.railway.gov.bd/' ||
+          currentUrl === 'https://eticket.railway.gov.bd' ||
+          currentUrl === 'https://eticket.railway.gov.bd/#'
+        );
+
+      if (isRailwayHomepage) {
         this.checkAborted(signal);
         this.onStateChange(AutomationState.SELECTING_ROUTE, `Setting route ${this.settings.fromStation} → ${this.settings.toStation}`);
+
         this.onLog(`Selecting origin: ${this.settings.fromStation}`, 'info');
         await RailwayAdapter.selectStation('from', this.settings.fromStation, this.settings.actionDelay, signal);
 
@@ -91,10 +210,6 @@ export class AutomationEngine {
 
         this.checkAborted(signal);
         this.onStateChange(AutomationState.SEARCHING, 'Submitting train search query...');
-        
-        if (this.settings.seatClass) {
-          await RailwayAdapter.selectClass(this.settings.seatClass, this.settings.actionDelay, signal);
-        }
 
         this.onLog('Clicking Search Train button...', 'info');
 
@@ -112,153 +227,494 @@ export class AutomationEngine {
           searchBtn.click();
         }
 
-        await this.delay(500, signal);
+        // ── Wait up to 4.5s for the SPA to navigate to search results organically ──
+        let searchNavigatedOrRendered = false;
+        for (let i = 0; i < 15; i++) {
+          this.checkAborted(signal);
+          await this.delay(300, signal);
+          const hasCards = document.querySelectorAll(
+            '.train-item, .train-card, .single-train-details, .search-result-item, [class*="single-train"]'
+          ).length > 0;
+          if (window.location.href.includes('/booking/train/search') || hasCards) {
+            searchNavigatedOrRendered = true;
+            this.onLog('SPA search submission completed naturally.', 'info');
+            break;
+          }
+        }
 
-        // If form click did not navigate to search results page, navigate directly via URL parameter format
-        if (!window.location.href.includes('/booking/train/search')) {
-          this.onLog(`Navigating directly to search results: ${this.settings.fromStation} → ${this.settings.toStation} (${this.settings.journeyDate})...`, 'info');
+        // ── Fallback: direct URL navigation only if SPA did NOT respond ──
+        if (!searchNavigatedOrRendered) {
+          this.onLog(
+            `SPA search form did not respond after 4.5s. Navigating via URL as last resort: ${this.settings.fromStation} → ${this.settings.toStation} (${this.settings.journeyDate})`,
+            'warning'
+          );
           RailwayAdapter.navigateToSearchResults(
             this.settings.fromStation,
             this.settings.toStation,
             this.settings.journeyDate,
             this.settings.seatClass
           );
+          // After a hard navigation, the page will reload — the content script will re-run automatically.
+          return;
         }
       }
 
-      // Step 5: Run Train Finding if on Search Results page or after homepage search
-      if (pageType === 'HOMEPAGE' || pageType === 'SEARCH_RESULTS') {
-        this.checkAborted(signal);
-        this.onStateChange(AutomationState.SEARCH_RESULTS, 'Waiting for train search results...');
-        this.onLog(`Searching for target train '${this.settings.targetTrain}'...`, 'info');
+      // ── STEP 3: Wait for search results / target train ─────────────
 
-        let trainSelected = false;
-        for (let attempt = 0; attempt < 10; attempt++) {
+      this.onLog(
+        'Search results URL reached. Waiting for train results to render...',
+        'info'
+      );
+
+      let resultsReady = false;
+
+      const targetText = this.settings.targetTrain
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      const trainNumberMatch = targetText.match(/\b\d{2,5}\b/);
+      const targetTrainNumber = trainNumberMatch?.[0] || '';
+
+      const targetTrainName = targetText
+        .replace(/\(\s*\d{2,5}\s*\)/g, '')
+        .replace(/\b\d{2,5}\b/g, '')
+        .replace(/\bexpress\b/gi, '')
+        .replace(/[-()]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      for (let attempt = 0; attempt < 40; attempt++) {
+        this.checkAborted(signal);
+
+        const currentUrl = window.location.href.toLowerCase();
+        const pageType = this.detectCurrentPageType();
+
+        const bodyText = (document.body.innerText || '')
+          .toLowerCase()
+          .replace(/\s+/g, ' ');
+
+        const trainCards = document.querySelectorAll(
+          [
+            '.train-item',
+            '.train-card',
+            '.single-train-details',
+            '.search-result-item',
+            '[class*="single-train"]',
+            '[class*="train-item"]'
+          ].join(',')
+        );
+
+        const foundByNumber =
+          !!targetTrainNumber &&
+          bodyText.includes(targetTrainNumber);
+
+        const foundByName =
+          !!targetTrainName &&
+          targetTrainName.length >= 3 &&
+          bodyText.includes(targetTrainName);
+
+        this.onLog(
+          `Search results check ${attempt + 1}/40 | Page=${pageType} | Cards=${trainCards.length} | Target=${this.settings.targetTrain}`,
+          'info'
+        );
+
+        if (
+          currentUrl.includes('/booking/train/search') &&
+          (foundByNumber || foundByName)
+        ) {
+          resultsReady = true;
+
+          this.onLog(
+            `Target train '${this.settings.targetTrain}' detected in search results.`,
+            'success'
+          );
+
+          break;
+        }
+
+        await this.delay(500, signal);
+      }
+
+      if (!resultsReady) {
+        this.onLog(
+          `Search page loaded, but target train '${this.settings.targetTrain}' was not found.`,
+          'error'
+        );
+
+        this.onStateChange(
+          AutomationState.ERROR,
+          `Target train '${this.settings.targetTrain}' was not found.`
+        );
+
+        return;
+      }
+
+      // ── STEP 4: Find target train & click Book button ─────────────────────
+      // Re-check page type — do NOT use a stale variable from before navigation.
+      const currentPageType = this.detectCurrentPageType();
+      if (currentPageType === 'SEARCH_RESULTS' || currentPageType === 'HOMEPAGE') {
+        this.checkAborted(signal);
+        this.onStateChange(AutomationState.SEARCH_RESULTS, 'Locating target train on search results...');
+
+        let trainBookingOpened = false;
+
+        for (let attempt = 0; attempt < 5; attempt++) {
           this.checkAborted(signal);
-          trainSelected = await RailwayAdapter.findAndSelectTargetTrain(
+
+          this.onLog(
+            `Looking for target train '${this.settings.targetTrain}' — Seat class: ${this.settings.seatClass} (attempt ${attempt + 1}/5)...`,
+            'info'
+          );
+
+          const beforeUrl = window.location.href;
+
+          // findAndSelectTargetTrain returns true only if it clicked an element with booking intent.
+          const clicked = await RailwayAdapter.findAndSelectTargetTrain(
             this.settings.targetTrain,
             this.settings.seatClass,
             this.settings.actionDelay,
             signal
           );
-          if (trainSelected) {
-            this.onLog(`Found and selected target train '${this.settings.targetTrain}'`, 'success');
-            break;
+
+          if (!clicked) {
+            this.onLog(`Train card or booking button not yet visible (attempt ${attempt + 1}/5). Waiting...`, 'info');
+            await this.delay(600, signal);
+            continue;
           }
-          await this.delay(400, signal);
+
+          this.onLog('Booking button clicked. Waiting for Railway to navigate to booking / seat map page...', 'info');
+
+          // ── Verify post-click navigation ──────────────────────────────────
+          // Poll up to 6 seconds (20 × 300ms) after the click.
+          for (let wait = 0; wait < 20; wait++) {
+            this.checkAborted(signal);
+            await this.delay(300, signal);
+
+            const currentUrl = window.location.href;
+            const livePage = this.detectCurrentPageType();
+
+            this.onLog(`Post-click check ${wait + 1}/20 — Page: ${livePage} | URL: ${currentUrl}`, 'info');
+
+            // ✅ Success: seat map or booking page appeared
+            if (livePage === 'SEAT_MAP' || currentUrl.includes('/booking/seat') || currentUrl.includes('/seat-selection')) {
+              trainBookingOpened = true;
+              this.onLog(`Target train '${this.settings.targetTrain}' booking page opened successfully!`, 'success');
+              break;
+            }
+
+            // ✅ Also accept: still on /booking/train/... but DOM changed (card-selection modal appeared)
+            if (currentUrl.includes('/booking/train') && livePage !== 'SEARCH_RESULTS') {
+              trainBookingOpened = true;
+              this.onLog(`Booking action registered. Continuing to seat map detection...`, 'success');
+              break;
+            }
+
+            // 🚨 CRITICAL FAIL: Railway redirected to homepage
+            if (this.isHomePage() && currentUrl !== beforeUrl) {
+              this.onLog(
+                `🚨 Railway redirected to the homepage after clicking Book. The clicked element was NOT accepted as a booking action by the Railway application. Check console diagnostics for clicked element details.`,
+                'error'
+              );
+              this.onStateChange(
+                AutomationState.ERROR,
+                'Railway returned to homepage after Book click. Check extension diagnostics in browser console.'
+              );
+              return; // Hard stop — do NOT retry this cycle
+            }
+          }
+
+          if (trainBookingOpened) break;
+
+          this.onLog(`Book click did not open booking/seat map page after 6s (attempt ${attempt + 1}/5).`, 'warning');
         }
 
-        if (!trainSelected && pageType === 'SEARCH_RESULTS') {
-          this.onLog(`Could not locate train '${this.settings.targetTrain}' on search results page.`, 'warning');
+        if (!trainBookingOpened) {
+          this.onStateChange(
+            AutomationState.ERROR,
+            `Could not open booking page for '${this.settings.targetTrain}'. Please click Book Now manually.`
+          );
+          this.onLog(`Could not open booking page for '${this.settings.targetTrain}' after 5 attempts.`, 'error');
+          return;
         }
 
-        const postSearchHalt = RailwayAdapter.detectSafetyHalt();
-        if (postSearchHalt) {
-          this.handleSafetyHalt(postSearchHalt);
+        // Safety halt check after train selection
+        const postSelectHalt = RailwayAdapter.detectSafetyHalt();
+        if (postSelectHalt) {
+          this.handleSafetyHalt(postSelectHalt);
           return;
         }
       }
 
-      // Step 6: Seat Map Detection & Selection (Runs on SEAT_MAP page or after selecting train)
+      // ── STEP 5: Seat Map Detection & Selection ────────────────────────────
+
       this.checkAborted(signal);
-      this.onStateChange(AutomationState.WAITING_FOR_SEAT_MAP, 'Waiting for train seat map...');
+
+      this.onStateChange(
+        AutomationState.WAITING_FOR_SEAT_MAP,
+        `Waiting for ${this.settings.seatClass} seat map...`
+      );
 
       let coachMaps: CoachSeatMap[] = [];
-      const maxSeatMapAttempts = 40; // Retry up to ~15 seconds for network/DOM render
+
+      const maxSeatMapAttempts = 40;
 
       for (let attempt = 0; attempt < maxSeatMapAttempts; attempt++) {
         this.checkAborted(signal);
 
-        // 1. If train was clicked but seat map hasn't loaded after 8 attempts, re-trigger target train selection
-        if (attempt > 0 && attempt % 8 === 0) {
-          this.onLog(`Still waiting for seat map (attempt ${attempt + 1}/${maxSeatMapAttempts}). Re-checking Book Now button for '${this.settings.targetTrain}'...`, 'info');
-          RailwayAdapter.findAndSelectTargetTrain(
-            this.settings.targetTrain,
-            this.settings.seatClass,
-            this.settings.actionDelay,
-            signal
-          ).catch(() => {});
+        if (this.isHomePage()) {
+          this.onLog(
+            'Page returned to homepage while waiting for seat map. Aborting.',
+            'error'
+          );
+
+          this.onStateChange(
+            AutomationState.ERROR,
+            'Railway returned to homepage unexpectedly.'
+          );
+
+          return;
         }
 
-        // 2. Check if a "Select Coach" dropdown is present (e.g. GA - 1 Seat(s)) and select a coach with seats
-        const coachSelected = RailwayAdapter.selectBestCoachFromDropdown(this.settings.seatCount);
+        /*
+         * Select a coach that has enough seats for the requested
+         * seat count.
+         */
+        const coachSelected =
+          RailwayAdapter.selectBestCoachFromDropdown(
+            this.settings.seatCount
+          );
+
         if (coachSelected) {
-          await this.delay(300, signal);
+          this.onLog(
+            `Coach selected for ${this.settings.seatCount} requested seat(s).`,
+            'info'
+          );
+
+          await this.delay(500, signal);
         }
 
-        // 3. Try clicking coach tab buttons if present
+        /*
+         * If Railway uses coach tabs instead of dropdown.
+         */
         RailwayAdapter.clickAvailableCoachTab();
 
-        // 4. Parse seats from DOM
-        coachMaps = SeatMapParser.parseFromDOM(document);
+        await this.delay(200, signal);
 
-        if (coachMaps.length > 0) {
-          const availableSeatsCount = coachMaps.reduce((acc, c) => acc + c.seats.filter(s => s.isAvailable).length, 0);
-          if (availableSeatsCount >= this.settings.seatCount || availableSeatsCount > 0) {
-            this.onLog(`Detected seat map with ${availableSeatsCount} available seats across ${coachMaps.length} coach(es)!`, 'success');
-            break;
-          }
+        /*
+         * Parse current seat map.
+         */
+        coachMaps =
+          SeatMapParser.parseFromDOM(document);
+
+        const availableSeatsCount =
+          coachMaps.reduce(
+            (total, coach) =>
+              total +
+              coach.seats.filter(
+                seat => seat.isAvailable
+              ).length,
+            0
+          );
+
+        this.onLog(
+          `Seat-map attempt ${attempt + 1}/${maxSeatMapAttempts}: ${availableSeatsCount} available seat(s), ${this.settings.seatCount} required.`,
+          'info'
+        );
+
+        if (
+          availableSeatsCount >=
+          this.settings.seatCount
+        ) {
+          this.onLog(
+            `Enough seats found: ${availableSeatsCount}/${this.settings.seatCount}.`,
+            'success'
+          );
+
+          break;
+        }
+
+        if (availableSeatsCount > 0) {
+          this.onLog(
+            `Only ${availableSeatsCount} seat(s) available; ${this.settings.seatCount} required. Waiting for a suitable coach/seat layout...`,
+            'warning'
+          );
         }
 
         await this.delay(350, signal);
       }
 
-      if (coachMaps.length > 0) {
-        this.onStateChange(AutomationState.ANALYZING_SEATS, `Analyzing seat layouts for ${this.settings.seatCount} seats (${this.settings.seatMode})...`);
-        this.onLog(`Found ${coachMaps.length} coach seat maps (${coachMaps.reduce((acc, c) => acc + c.seats.length, 0)} total seats). Running spatial engine...`, 'info');
 
-        const selectionResult = SeatSelectionEngine.selectSeats(
+      // ── STEP 6: Seat Selection ───────────────────────────────
+
+      if (coachMaps.length === 0) {
+        this.onLog(
+          `No seat map detected for ${this.settings.targetTrain} / ${this.settings.seatClass}.`,
+          'error'
+        );
+
+        this.onStateChange(
+          AutomationState.ERROR,
+          'Seat map was not loaded.'
+        );
+
+        return;
+      }
+
+      this.onStateChange(
+        AutomationState.ANALYZING_SEATS,
+        `Selecting ${this.settings.seatCount} ${this.settings.seatClass} seat(s)...`
+      );
+
+      const totalAvailable =
+        coachMaps.reduce(
+          (total, coach) =>
+            total +
+            coach.seats.filter(
+              seat => seat.isAvailable
+            ).length,
+          0
+        );
+
+      if (totalAvailable < this.settings.seatCount) {
+        this.onLog(
+          `Only ${totalAvailable} seat(s) available but ${this.settings.seatCount} requested.`,
+          'error'
+        );
+
+        this.onStateChange(
+          AutomationState.ERROR,
+          `Not enough ${this.settings.seatClass} seats available.`
+        );
+
+        return;
+      }
+
+      const selectionResult =
+        SeatSelectionEngine.selectSeats(
           coachMaps,
           this.settings.seatCount,
           this.settings.seatMode,
           this.settings.allowFallback
         );
 
-        if (selectionResult.success) {
-          this.onLog(`Selected ${selectionResult.seats.length} seats: ${selectionResult.seats.map(s => s.name).join(', ')}`, 'success');
+      if (!selectionResult.success) {
+        this.onLog(
+          `Seat selection failed: ${selectionResult.reason}`,
+          'error'
+        );
 
-          // Click candidate seats
-          for (const s of selectionResult.seats) {
-            if (s.rawElement) {
-              (s.rawElement as HTMLElement).click();
-              await this.delay(80, signal);
-            }
-          }
+        this.onStateChange(
+          AutomationState.ERROR,
+          selectionResult.reason
+        );
 
-          await this.delay(this.settings.actionDelay, signal);
-
-          this.onStateChange(AutomationState.CONTINUE, 'Proceeding to checkout step...');
-          const continueBtn = RailwayAdapter.findElement([
-            '.btn-continue',
-            'button.continue-btn',
-            '.proceed-btn',
-            'button[type="submit"].btn-success',
-            '.purchase-btn',
-            '[class*="continue"]',
-            '[class*="purchase"]'
-          ]) || RailwayAdapter.findElementByText('button', 'continue')
-            || RailwayAdapter.findElementByText('button', 'purchase')
-            || RailwayAdapter.findElementByText('button', 'confirm');
-
-          if (continueBtn) {
-            continueBtn.click();
-            this.onLog('Clicked Continue / Purchase button!', 'success');
-          }
-
-          this.onStateChange(AutomationState.COMPLETED, 'Seat selection finished');
-          this.onLog('Automation process completed successfully', 'success');
-        } else {
-          this.onLog(`Seat selection failed: ${selectionResult.reason}`, 'error');
-          this.onStateChange(AutomationState.ERROR, `Seat selection failed: ${selectionResult.reason}`);
-          return;
-        }
-      } else {
-        this.onLog(`Seat map did not load or no seat elements were detected for train '${this.settings.targetTrain}'.`, 'error');
-        this.onStateChange(AutomationState.ERROR, 'Seat map did not load. Please click Book Now manually.');
         return;
       }
 
-      // Final safety halt check
+      /*
+       * Never continue with a partial selection.
+       */
+      if (
+        selectionResult.seats.length !==
+        this.settings.seatCount
+      ) {
+        const selectedCount = selectionResult.seats?.length || 0;
+
+        this.onLog(
+          `Seat selection failed. Requested ${this.settings.seatCount}, but only ${selectedCount} seat(s) could be selected. No checkout action will be performed.`,
+          'error'
+        );
+
+        this.onStateChange(
+          AutomationState.ERROR,
+          `Could not select exactly ${this.settings.seatCount} seat(s).`
+        );
+
+        return;
+      }
+
+      this.onLog(
+        `Selecting exactly ${selectionResult.seats.length} seat(s): ${selectionResult.seats
+          .map(s => s.name)
+          .join(', ')}`,
+        'success'
+      );
+
+
+      /*
+       * Click selected seats.
+       */
+      for (const seat of selectionResult.seats) {
+        this.checkAborted(signal);
+
+        if (seat.rawElement) {
+          (seat.rawElement as HTMLElement).click();
+
+          await this.delay(100, signal);
+        }
+      }
+
+      await this.delay(
+        this.settings.actionDelay,
+        signal
+      );
+
+
+      /*
+       * Continue only after exactly the requested number
+       * of seats has been selected.
+       */
+      const continueBtn =
+        RailwayAdapter.findElement([
+          '.btn-continue',
+          'button.continue-btn',
+          '.proceed-btn',
+          'button[type="submit"].btn-success',
+          '.purchase-btn',
+          '[class*="continue"]',
+          '[class*="purchase"]'
+        ]) ||
+        RailwayAdapter.findElementByText(
+          'button',
+          'continue'
+        ) ||
+        RailwayAdapter.findElementByText(
+          'button',
+          'purchase'
+        ) ||
+        RailwayAdapter.findElementByText(
+          'button',
+          'confirm'
+        );
+
+      if (!continueBtn) {
+        this.onLog(
+          'Continue/Purchase button not found.',
+          'error'
+        );
+
+        this.onStateChange(
+          AutomationState.ERROR,
+          'Continue button not found.'
+        );
+
+        return;
+      }
+
+      continueBtn.click();
+
+      this.onLog(
+        `Continue clicked with ${selectionResult.seats.length} ${this.settings.seatClass} seat(s).`,
+        'success'
+      );
+
+      this.onStateChange(
+        AutomationState.COMPLETED,
+        'Seat selection completed.'
+      );
+
+      // ── STEP 7: Final safety halt check ──────────────────────────────────
       const finalHalt = RailwayAdapter.detectSafetyHalt();
       if (finalHalt) {
         this.handleSafetyHalt(finalHalt);

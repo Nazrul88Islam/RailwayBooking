@@ -20,7 +20,7 @@ export class RailwayAdapter {
     const elements = Array.from(document.querySelectorAll(tag));
     for (const el of elements) {
       if (el.textContent?.toLowerCase().includes(text.toLowerCase()) ||
-          el.getAttribute('placeholder')?.toLowerCase().includes(text.toLowerCase())) {
+        el.getAttribute('placeholder')?.toLowerCase().includes(text.toLowerCase())) {
         return el as HTMLElement;
       }
     }
@@ -81,7 +81,7 @@ export class RailwayAdapter {
 
       for (let i = 0; i < text.length; i++) {
         if (signal?.aborted) throw new Error('Automation aborted by user');
-        
+
         const char = text.substring(0, i + 1);
         this.setInputValue(inputEl, char);
         inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: text[i], bubbles: true }));
@@ -131,7 +131,7 @@ export class RailwayAdapter {
     if (!inputEl) return false;
 
     await this.typeWithHumanPacing(inputEl, stationName, baseDelayMs, signal);
-    
+
     // Wait brief moment for dropdown suggestions to open
     await new Promise(r => setTimeout(r, Math.min(baseDelayMs, 300)));
 
@@ -144,9 +144,6 @@ export class RailwayAdapter {
     return true;
   }
 
-  /**
-   * Set journey date supporting React DatePickers, direct text inputs, and calendar overlays
-   */
   /**
    * Format date string YYYY-MM-DD into DD-MMM-YYYY (e.g. 30-Sep-2026) for BD Railway URL
    */
@@ -164,7 +161,8 @@ export class RailwayAdapter {
   }
 
   /**
-   * Direct navigation to search results URL if standard form submit is blocked or reloads home
+   * Direct navigation to search results URL if standard form submit is blocked or reloads home.
+   * Only triggers if not already on the search results page.
    */
   public static navigateToSearchResults(
     fromStation: string,
@@ -189,7 +187,7 @@ export class RailwayAdapter {
     signal?: AbortSignal
   ): Promise<boolean> {
     const inputEl = (this.findElement(RAILWAY_SELECTORS.datePickerInput) ||
-                    this.findElementByText('input', 'date')) as HTMLInputElement;
+      this.findElementByText('input', 'date')) as HTMLInputElement;
 
     if (!inputEl) return false;
 
@@ -203,8 +201,8 @@ export class RailwayAdapter {
     const monthName = monthNames[monthNum - 1] || 'Sep';
 
     const formatDDMMMYYYY = `${dayStr}-${monthName}-${yearStr}`; // 30-Sep-2026
-    const formatYYYYMMDD = `${yearStr}-${monthStr}-${dayStr}`;    // 2026-09-30
-    const formatDDMMYYYY = `${dayStr}/${monthStr}/${yearStr}`;    // 30/09/2026
+    const formatYYYYMMDD = `${yearStr}-${monthStr}-${dayStr}`;   // 2026-09-30
+    const formatDDMMYYYY = `${dayStr}/${monthStr}/${yearStr}`;   // 30/09/2026
 
     inputEl.focus();
     inputEl.click();
@@ -234,7 +232,7 @@ export class RailwayAdapter {
       const cls = el.className || '';
       const txt = el.textContent?.trim();
       return (cls.includes(`--${dayPad3}`) || cls.includes(`--${dayStr}`) || txt === String(dayNum)) &&
-             !cls.includes('disabled') && !cls.includes('outside');
+        !cls.includes('disabled') && !cls.includes('outside');
     });
 
     if (targetDayEl) {
@@ -351,15 +349,15 @@ export class RailwayAdapter {
 
     if (!selectEl) {
       selectEl = (this.findElement(RAILWAY_SELECTORS.seatClassSelect) ||
-                  this.findElementByText('select', 'class') ||
-                  this.findElementByText('select', 'choose')) as HTMLSelectElement;
+        this.findElementByText('select', 'class') ||
+        this.findElementByText('select', 'choose')) as HTMLSelectElement;
     }
 
     if (!selectEl) return false;
 
     const variations = this.getClassVariations(className);
     const options = Array.from(selectEl.options);
-    
+
     const targetOption = options.find(opt => {
       const v = (opt.value || '').trim().toUpperCase();
       const t = (opt.text || '').trim().toUpperCase();
@@ -378,7 +376,98 @@ export class RailwayAdapter {
   }
 
   /**
-   * Find target train card on search results page and click class / Book Now button
+   * Returns true if a candidate element has strong evidence it is a booking action button.
+   * Evidence required: text or ARIA label must contain one of the booking intent keywords.
+   * An element with no text, no aria-label, and no booking-related class is NOT accepted.
+   */
+  private static isBookingIntentElement(el: HTMLElement): boolean {
+    const text = (el.textContent || '').trim().toUpperCase();
+    const ariaLabel = (el.getAttribute('aria-label') || '').toUpperCase();
+    const className = (el.className || '').toString().toUpperCase();
+
+    // Must carry explicit booking intent in text, aria-label, or class name
+    const BOOKING_KEYWORDS = ['BOOK', 'PURCHASE', 'বুক', 'টিকেট', 'BUY', 'RESERVE'];
+    const hasBookingIntent = BOOKING_KEYWORDS.some(kw =>
+      text.includes(kw) || ariaLabel.includes(kw) || className.includes(kw)
+    );
+
+    if (!hasBookingIntent) return false;
+
+    // Reject navigation/UI text that isn't a booking action
+    const EXCLUDE_KEYWORDS = ['DETAILS', 'VIEW', 'SCHEDULE', 'INFO', 'MORE', 'SHARE', 'PRINT', 'CANCEL', 'CLOSE'];
+    if (EXCLUDE_KEYWORDS.some(kw => text === kw || ariaLabel === kw)) return false;
+
+    return true;
+  }
+
+  /**
+   * Returns true if an element's href (or its parent <a>'s href) does NOT point to the homepage or a void/hash URL.
+   */
+  public static isValidBookingHref(el: HTMLElement): boolean {
+    const rawHref = el.getAttribute('href') || el.closest('a')?.getAttribute('href');
+    if (!rawHref) return true; // Pure button / no href — pass through (text evidence is checked separately)
+    const h = rawHref.toLowerCase().trim();
+    if (h === '' || h === '#' || h === 'javascript:void(0)' || h === 'javascript:;') return false;
+    if (h === '/' || h === '/#' || h === '/?' ||
+      h === 'https://eticket.railway.gov.bd' ||
+      h === 'https://eticket.railway.gov.bd/' ||
+      h === 'https://eticket.railway.gov.bd/#') return false;
+    if (h.startsWith('https://eticket.railway.gov.bd/?') || h.startsWith('/?')) return false;
+    return true;
+  }
+
+  /**
+   * Diagnostic helper — dumps all interactive elements within the matched train card to console.
+   * Call this before attempting to click any booking element.
+   */
+  public static debugTrainCard(card: HTMLElement): void {
+    console.group('[Railway] Target Train Card Diagnostics');
+    console.log('Card Container Element:', card);
+
+    const clickableElements = Array.from(
+      card.querySelectorAll('button, a, input, [role="button"], [class*="book"]')
+    );
+
+    console.log(`Found ${clickableElements.length} clickable candidate element(s) in card:`);
+
+    clickableElements.forEach((el, index) => {
+      const element = el as HTMLElement;
+      const dataAttrs: Record<string, string> = {};
+      Array.from(element.attributes).forEach(attr => {
+        if (attr.name.startsWith('data-')) {
+          dataAttrs[attr.name] = attr.value;
+        }
+      });
+
+      console.log(`  [Element #${index}]`, {
+        tag: element.tagName,
+        text: element.textContent?.trim(),
+        value: (element as HTMLInputElement).value || undefined,
+        href: element.getAttribute('href'),
+        parentHref: element.closest('a')?.getAttribute('href'),
+        className: element.className,
+        id: element.id,
+        role: element.getAttribute('role'),
+        ariaLabel: element.getAttribute('aria-label'),
+        dataAttributes: dataAttrs,
+        bookingIntent: this.isBookingIntentElement(element),
+        validHref: this.isValidBookingHref(element)
+      });
+    });
+
+    console.groupEnd();
+  }
+
+  /**
+   * Find target train card on search results page and click the seat class Book Now button.
+   *
+   * Returns true if a booking-intent button was found and clicked.
+   * Does NOT verify post-click navigation — that is the responsibility of AutomationEngine.
+   *
+   * Priority order:
+   *   1. Button/link inside the matching seat-class sub-container with booking intent text + valid href
+   *   2. Any button/link inside the whole train card with booking intent text + valid href
+   *   -- NO generic "first button" fallback (too dangerous on React SPAs) --
    */
   public static async findAndSelectTargetTrain(
     targetTrain: string,
@@ -386,137 +475,305 @@ export class RailwayAdapter {
     baseDelayMs: number,
     signal?: AbortSignal
   ): Promise<boolean> {
-    const query = targetTrain.toLowerCase().trim();
-    const trainNumMatch = query.match(/\d+/);
-    const trainNumber = trainNumMatch ? trainNumMatch[0] : ''; // e.g. "773" for KALNI EXPRESS (773)
-    const cleanName = query.replace(/\(\d+\)/, '').replace(/express/g, '').trim(); // e.g. "kalni"
-
-    // 1. Search headings and train title elements specifically
-    const candidateTitles = Array.from(document.querySelectorAll(
-      'h1, h2, h3, h4, h5, h6, .train-name, [class*="train-name"], [class*="trainTitle"], [class*="train-title"], [class*="TrainName"]'
-    ));
-
-    let matchedTitleEl: HTMLElement | null = null;
-
-    for (const titleEl of candidateTitles) {
-      const text = (titleEl.textContent || '').toLowerCase();
-      if (trainNumber && text.includes(trainNumber)) {
-        matchedTitleEl = titleEl as HTMLElement;
-        break;
+    console.log(
+      '[Railway] SEARCH PAGE DIAGNOSTICS',
+      {
+        url: window.location.href,
+        title: document.title,
+        bodyLength: document.body?.innerText?.length || 0,
+        bodyText: (document.body?.innerText || '').substring(0, 5000)
       }
-      if (cleanName && cleanName.length >= 3 && text.includes(cleanName)) {
-        matchedTitleEl = titleEl as HTMLElement;
-        break;
-      }
-    }
+    );
 
-    // 2. Fallback search across all text nodes if heading tag wasn't used
-    if (!matchedTitleEl) {
-      const allDivs = Array.from(document.querySelectorAll('div, section, article, p, span, strong, b'));
-      for (const el of allDivs) {
-        const text = (el.textContent || '').trim().toLowerCase();
-        if (text.length > 0 && text.length <= 100) {
-          if (trainNumber && text.includes(trainNumber)) {
-            matchedTitleEl = el as HTMLElement;
-            break;
-          }
-          if (cleanName && cleanName.length >= 3 && text.includes(cleanName)) {
-            matchedTitleEl = el as HTMLElement;
-            break;
-          }
-        }
-      }
-    }
+    const query = targetTrain.trim().toLowerCase();
 
-    if (!matchedTitleEl) return false;
+    // Support:
+    // "KALNI EXPRESS"
+    // "KALNI EXPRESS (773)"
+    // "773"
+    // "773 - KALNI EXPRESS"
+    const trainNumberMatch = query.match(/\b\d{2,5}\b/);
+    const targetTrainNumber = trainNumberMatch?.[0] || '';
 
-    // 3. Walk up the DOM tree to find the immediate single train card container
-    let matchedCard: HTMLElement | null = matchedTitleEl.closest(
+    const targetTrainName = query
+      .replace(/\(\s*\d{2,5}\s*\)/g, '')
+      .replace(/\b\d{2,5}\b/g, '')
+      .replace(/\bexpress\b/gi, '')
+      .replace(/[-()]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    console.log('[Railway] Target train:', {
+      original: targetTrain,
+      number: targetTrainNumber,
+      name: targetTrainName,
+      seatClass
+    });
+
+    const trainCards = Array.from(document.querySelectorAll(
       '.single-train-details, .train-item, .train-card, .search-result-item, [class*="single-train"], [class*="train-item"]'
-    ) as HTMLElement;
+    )) as HTMLElement[];
+
+    if (!trainCards.length) {
+      console.warn(
+        '[Railway] No train cards found using current selectors.'
+      );
+
+      console.log(
+        '[Railway] All buttons:',
+        Array.from(document.querySelectorAll('button')).map((el, i) => ({
+          index: i,
+          text: el.textContent?.trim(),
+          className: el.className,
+          ariaLabel: el.getAttribute('aria-label')
+        }))
+      );
+
+      console.log(
+        '[Railway] All links:',
+        Array.from(document.querySelectorAll('a')).map((el, i) => ({
+          index: i,
+          text: el.textContent?.trim(),
+          href: el.getAttribute('href'),
+          className: el.className
+        }))
+      );
+
+      return false;
+    }
+
+    let matchedCard: HTMLElement | null = null;
+
+    for (const card of trainCards) {
+      const cardText = (card.textContent || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+
+      const numberMatches =
+        !!targetTrainNumber &&
+        cardText.includes(targetTrainNumber);
+
+      const nameMatches =
+        !!targetTrainName &&
+        targetTrainName.length >= 3 &&
+        cardText.includes(targetTrainName);
+
+      // If both number and name are supplied, prefer a card
+      // containing both.
+      if (
+        targetTrainNumber &&
+        targetTrainName &&
+        numberMatches &&
+        nameMatches
+      ) {
+        matchedCard = card;
+        break;
+      }
+
+      // Number-only search
+      if (targetTrainNumber && numberMatches) {
+        matchedCard = card;
+        break;
+      }
+
+      // Name-only search
+      if (!targetTrainNumber && nameMatches) {
+        matchedCard = card;
+        break;
+      }
+    }
 
     if (!matchedCard) {
-      let parent: HTMLElement | null = matchedTitleEl.parentElement;
-      while (parent && parent !== document.body) {
-        if (parent.querySelector('button, a')) {
-          matchedCard = parent;
-          break;
-        }
-        parent = parent.parentElement;
-      }
+      console.warn(
+        `[Railway] Target train not found: ${targetTrain}`
+      );
+
+      return false;
     }
 
-    if (!matchedCard) return false;
+    console.log('[Railway] Target train card found:', matchedCard);
 
-    // Auto-scroll page so target train card (e.g. KALNI EXPRESS 773) is centered on screen
     try {
-      matchedCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    } catch (e) {
+      matchedCard.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center'
+      });
+    } catch {
       matchedCard.scrollIntoView();
     }
 
-    // 4. Locate seat class blocks inside matched card
-    const variations = this.getClassVariations(seatClass);
-    const subContainers = Array.from(matchedCard.querySelectorAll('div, section, article, li, td'));
+    this.debugTrainCard(matchedCard);
 
-    let targetBookBtn: HTMLElement | null = null;
+    const classVariations = this.getClassVariations(seatClass);
 
-    // A. Search for sub-container matching requested seat class (e.g. SNIGDHA, AC_S, S_CHAIR)
-    for (const container of subContainers) {
-      const text = (container.textContent || '').toUpperCase();
-      if (variations.some(varStr => text.includes(varStr))) {
-        // Find button or book link inside this class container
-        const btn = container.querySelector('button, a, input[type="button"], input[type="submit"], .btn-book-now, [class*="book"]') as HTMLElement;
-        if (btn) {
-          const href = (btn.getAttribute('href') || '').toLowerCase().trim();
-          if (href !== '/' && href !== 'https://eticket.railway.gov.bd/' && href !== 'https://eticket.railway.gov.bd') {
-            targetBookBtn = btn;
-            break;
-          }
-        }
+    /*
+     * Find the smallest DOM container that contains the requested
+     * seat class. This is important because searching the entire
+     * train card can accidentally select another class.
+     */
+    const elements = Array.from(
+      matchedCard.querySelectorAll('*')
+    ) as HTMLElement[];
+
+    let classContainer: HTMLElement | null = null;
+
+    for (const el of elements) {
+      const text = (el.textContent || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toUpperCase();
+
+      if (!text || text.length > 300) {
+        continue;
+      }
+
+      const matchesClass = classVariations.some(v =>
+        text === v ||
+        text.includes(v)
+      );
+
+      if (!matchesClass) {
+        continue;
+      }
+
+      const bookingCandidates = el.querySelectorAll(
+        'button, a, input[type="button"], input[type="submit"], [role="button"]'
+      );
+
+      if (bookingCandidates.length > 0) {
+        classContainer = el;
+        break;
       }
     }
 
-    // B. Fallback A: Search all buttons/links inside card whose text includes "BOOK", "SELECT", "PURCHASE", or "বুক"
-    if (!targetBookBtn) {
-      const candidateBtns = Array.from(matchedCard.querySelectorAll('button, a, input[type="button"], input[type="submit"], .btn-book-now, [class*="book"]'));
-      for (const btn of candidateBtns) {
-        const text = (btn.textContent || (btn as HTMLInputElement).value || '').toUpperCase();
-        const href = (btn.getAttribute('href') || '').toLowerCase().trim();
-        if (href === '/' || href === 'https://eticket.railway.gov.bd/' || href === 'https://eticket.railway.gov.bd') {
-          continue; // EXCLUDE home links
-        }
-        if (text.includes('BOOK') || text.includes('SELECT') || text.includes('PURCHASE') || text.includes('বুক') || text.includes('টিকেট')) {
-          targetBookBtn = btn as HTMLElement;
+    let targetBookBtn: HTMLElement | null = null;
+
+    /*
+     * First priority:
+     * Book button inside requested class container.
+     */
+    if (classContainer) {
+      const candidates = Array.from(
+        classContainer.querySelectorAll(
+          'button, a, input[type="button"], input[type="submit"], [role="button"]'
+        )
+      ) as HTMLElement[];
+
+      for (const candidate of candidates) {
+        if (
+          this.isBookingIntentElement(candidate) &&
+          this.isValidBookingHref(candidate)
+        ) {
+          targetBookBtn = candidate;
           break;
         }
       }
     }
 
-    // C. Fallback B: Any pure button (NOT <a> link) inside matchedCard
+    /*
+     * Second priority:
+     * Find a class-specific row/container directly.
+     */
     if (!targetBookBtn) {
-      const pureButtons = Array.from(matchedCard.querySelectorAll('button, input[type="button"], input[type="submit"]'));
-      if (pureButtons.length > 0) {
-        targetBookBtn = pureButtons[0] as HTMLElement;
+      const containers = Array.from(
+        matchedCard.querySelectorAll(
+          'div, section, article, li, td, tr'
+        )
+      ) as HTMLElement[];
+
+      for (const container of containers) {
+        const text = (container.textContent || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toUpperCase();
+
+        if (!classVariations.some(v => text.includes(v))) {
+          continue;
+        }
+
+        const candidates = Array.from(
+          container.querySelectorAll(
+            'button, a, input[type="button"], input[type="submit"], [role="button"]'
+          )
+        ) as HTMLElement[];
+
+        for (const candidate of candidates) {
+          if (
+            this.isBookingIntentElement(candidate) &&
+            this.isValidBookingHref(candidate)
+          ) {
+            targetBookBtn = candidate;
+            break;
+          }
+        }
+
+        if (targetBookBtn) {
+          break;
+        }
       }
     }
 
-    if (targetBookBtn) {
-      try {
-        targetBookBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      } catch (e) {
-        targetBookBtn.scrollIntoView();
-      }
-      targetBookBtn.focus();
-      targetBookBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-      targetBookBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-      targetBookBtn.click();
-      return true;
+    if (!targetBookBtn) {
+      console.warn(
+        `[Railway] Could not find Book button for ${seatClass} in ${targetTrain}`
+      );
+
+      return false;
     }
 
-    return false;
+    console.log('[Railway] Target booking button:', {
+      train: targetTrain,
+      seatClass,
+      tag: targetBookBtn.tagName,
+      text: targetBookBtn.textContent?.trim(),
+      href: targetBookBtn.getAttribute('href'),
+      className: targetBookBtn.className
+    });
+
+    try {
+      targetBookBtn.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center'
+      });
+    } catch {
+      targetBookBtn.scrollIntoView();
+    }
+
+    await new Promise(resolve =>
+      setTimeout(resolve, Math.min(baseDelayMs, 300))
+    );
+
+    if (signal?.aborted) {
+      throw new Error('Automation aborted by user');
+    }
+
+    targetBookBtn.focus();
+
+    targetBookBtn.dispatchEvent(
+      new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      })
+    );
+
+    targetBookBtn.dispatchEvent(
+      new MouseEvent('mouseup', {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      })
+    );
+
+    targetBookBtn.click();
+
+    console.log(
+      `[Railway] Book clicked for ${targetTrain} / ${seatClass}`
+    );
+
+    return true;
   }
-
   /**
    * Click unselected coach tab/button to load coach seat grid
    */
@@ -538,78 +795,136 @@ export class RailwayAdapter {
   /**
    * Find "Select Coach" dropdown on seat map view and automatically select a coach with available seats
    */
-  public static selectBestCoachFromDropdown(requiredSeats: number = 1): boolean {
-    const selects = Array.from(document.querySelectorAll('select'));
+  public static selectBestCoachFromDropdown(
+    requiredSeats: number = 1
+  ): boolean {
+    const selects = Array.from(
+      document.querySelectorAll('select')
+    );
+
     let coachSelectEl: HTMLSelectElement | null = null;
 
-    // Find select element containing coach options like "GA ( 20 Available )", "KA - 1 Seat(s)", "KHA - 0 Seat(s)"
     for (const sel of selects) {
-      const nameOrId = (sel.name || sel.id || sel.getAttribute('aria-label') || '').toLowerCase();
-      const optionTexts = Array.from(sel.options).map(o => (o.text || o.value).toUpperCase());
-      
-      if (nameOrId.includes('coach') || nameOrId.includes('bogey') ||
-          optionTexts.some(txt => txt.includes('SEAT') || txt.includes('COACH') || txt.includes('AVAILABLE') || txt.includes('CHOICE') || txt.includes('SELECT'))) {
+      const nameOrId = (
+        sel.name ||
+        sel.id ||
+        sel.getAttribute('aria-label') ||
+        ''
+      ).toLowerCase();
+
+      const optionTexts = Array.from(sel.options)
+        .map(o => (o.text || o.value).toUpperCase());
+
+      const looksLikeCoach =
+        nameOrId.includes('coach') ||
+        nameOrId.includes('bogey') ||
+        optionTexts.some(txt =>
+          txt.includes('SEAT') ||
+          txt.includes('AVAILABLE') ||
+          txt.includes('COACH') ||
+          txt.includes('BOGIE') ||
+          txt.includes('BOGEY')
+        );
+
+      if (looksLikeCoach) {
         coachSelectEl = sel;
         break;
       }
     }
 
     if (!coachSelectEl) {
-      coachSelectEl = this.findElementByText('select', 'coach') as HTMLSelectElement;
+      console.warn('[Railway] Coach dropdown not found.');
+      return false;
     }
-
-    if (!coachSelectEl) return false;
 
     const options = Array.from(coachSelectEl.options);
-    if (options.length <= 1 && options[0]?.value === '') {
-      return false; // Options not loaded into DOM yet
-    }
 
-    let targetOpt: HTMLOptionElement | null = null;
-    let maxAvailable = -1;
+    let bestOption: HTMLOptionElement | null = null;
+    let bestAvailable = -1;
 
-    for (const opt of options) {
-      const text = (opt.text || opt.value).toUpperCase();
-      if (text.includes('SELECT') || text.includes('CHOOSE') || text.includes('OPTION') || opt.value === '') {
+    for (const option of options) {
+      const text = (
+        option.text ||
+        option.value ||
+        ''
+      ).trim().toUpperCase();
+
+      if (!text) continue;
+
+      if (
+        text.includes('SELECT') ||
+        text.includes('CHOOSE') ||
+        text.includes('OPTION')
+      ) {
         continue;
       }
 
-      // Extract seat count from text formats: "20 AVAILABLE", "20 SEATS", "(20)", "- 20"
-      const countMatch = text.match(/(\d+)\s*(?:SEAT|AVAILABLE|TICKET|\))/i) ||
-                         text.match(/\(\s*(\d+)\s*\)/) ||
-                         text.match(/[\-\:]\s*(\d+)/);
+      /*
+       * Examples:
+       *
+       * GA (20 Available)
+       * GA - 20 Seat(s)
+       * GA - 20 Seats
+       * GA (20)
+       */
+      const matches = [
+        text.match(/(\d+)\s*AVAILABLE/i),
+        text.match(/(\d+)\s*SEAT/i),
+        text.match(/\(\s*(\d+)\s*\)/),
+        text.match(/[-:]\s*(\d+)/)
+      ];
 
-      let availableCount = 0;
-      if (countMatch) {
-        availableCount = parseInt(countMatch[1], 10);
-      } else if (!text.includes('0 ') && !text.includes('NONE') && !text.includes('FULL') && !text.includes('UNAVAILABLE')) {
-        availableCount = 1;
+      let available = 0;
+
+      for (const match of matches) {
+        if (match) {
+          available = parseInt(match[1], 10);
+          break;
+        }
       }
 
-      if (availableCount >= requiredSeats && availableCount > maxAvailable) {
-        maxAvailable = availableCount;
-        targetOpt = opt;
-      } else if (availableCount > 0 && maxAvailable < requiredSeats && availableCount > maxAvailable) {
-        maxAvailable = availableCount;
-        targetOpt = opt;
+      if (available <= 0) {
+        continue;
+      }
+
+      console.log(
+        `[Railway] Coach ${text}: ${available} available`
+      );
+
+      /*
+       * We want a coach that can satisfy the requested
+       * number of seats.
+       */
+      if (
+        available >= requiredSeats &&
+        available > bestAvailable
+      ) {
+        bestOption = option;
+        bestAvailable = available;
       }
     }
 
-    // Fallback: Pick any non-placeholder option
-    if (!targetOpt) {
-      targetOpt = options.find(opt => {
-        const text = (opt.text || opt.value).toUpperCase();
-        return opt.value !== '' && !text.includes('SELECT') && !text.includes('CHOOSE') && !text.includes('0 AVAIL') && !text.includes('0 SEAT');
-      }) || null;
+    if (!bestOption) {
+      console.warn(
+        `[Railway] No coach has ${requiredSeats} available seat(s).`
+      );
+
+      return false;
     }
 
-    if (targetOpt && coachSelectEl.value !== targetOpt.value) {
+    console.log(
+      `[Railway] Selecting coach "${bestOption.text}" with ${bestAvailable} available seat(s).`
+    );
+
+    if (coachSelectEl.value !== bestOption.value) {
       coachSelectEl.focus();
-      this.setSelectValue(coachSelectEl, targetOpt.value);
-      return true;
+
+      this.setSelectValue(
+        coachSelectEl,
+        bestOption.value
+      );
     }
 
-    return targetOpt !== null && coachSelectEl.value === targetOpt.value;
+    return true;
   }
 }
-
