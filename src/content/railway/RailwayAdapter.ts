@@ -455,39 +455,50 @@ export class RailwayAdapter {
       matchedCard.scrollIntoView();
     }
 
-    // 4. Search for class sub-blocks & BOOK NOW button inside the target train card
+    // 4. Locate seat class blocks inside matched card
     const variations = this.getClassVariations(seatClass);
-    const allButtons = Array.from(matchedCard.querySelectorAll('button, a, input[type="button"], input[type="submit"], .btn-book-now, [class*="book"]'));
-    const bookButtons = allButtons.filter(btn => {
-      const text = (btn.textContent || (btn as HTMLInputElement).value || '').toUpperCase();
-      return text.includes('BOOK') || text.includes('SELECT') || text.includes('PURCHASE');
-    });
+    const subContainers = Array.from(matchedCard.querySelectorAll('div, section, article, li, td'));
 
     let targetBookBtn: HTMLElement | null = null;
 
-    // A. Check if any BOOK NOW button belongs to a parent container matching requested seatClass (e.g. SNIGDHA, AC_S, S_CHAIR)
-    for (const btn of bookButtons) {
-      let parent: HTMLElement | null = btn.parentElement;
-      let depth = 0;
-      while (parent && parent !== matchedCard && depth < 5) {
-        const text = (parent.textContent || '').toUpperCase();
-        if (variations.some(varStr => text.includes(varStr))) {
+    // A. Search for sub-container matching requested seat class (e.g. SNIGDHA, AC_S, S_CHAIR)
+    for (const container of subContainers) {
+      const text = (container.textContent || '').toUpperCase();
+      if (variations.some(varStr => text.includes(varStr))) {
+        // Find button or book link inside this class container
+        const btn = container.querySelector('button, a, input[type="button"], input[type="submit"], .btn-book-now, [class*="book"]') as HTMLElement;
+        if (btn) {
+          const href = (btn.getAttribute('href') || '').toLowerCase().trim();
+          if (href !== '/' && href !== 'https://eticket.railway.gov.bd/' && href !== 'https://eticket.railway.gov.bd') {
+            targetBookBtn = btn;
+            break;
+          }
+        }
+      }
+    }
+
+    // B. Fallback A: Search all buttons/links inside card whose text includes "BOOK", "SELECT", "PURCHASE", or "বুক"
+    if (!targetBookBtn) {
+      const candidateBtns = Array.from(matchedCard.querySelectorAll('button, a, input[type="button"], input[type="submit"], .btn-book-now, [class*="book"]'));
+      for (const btn of candidateBtns) {
+        const text = (btn.textContent || (btn as HTMLInputElement).value || '').toUpperCase();
+        const href = (btn.getAttribute('href') || '').toLowerCase().trim();
+        if (href === '/' || href === 'https://eticket.railway.gov.bd/' || href === 'https://eticket.railway.gov.bd') {
+          continue; // EXCLUDE home links
+        }
+        if (text.includes('BOOK') || text.includes('SELECT') || text.includes('PURCHASE') || text.includes('বুক') || text.includes('টিকেট')) {
           targetBookBtn = btn as HTMLElement;
           break;
         }
-        parent = parent.parentElement;
-        depth++;
       }
-      if (targetBookBtn) break;
     }
 
-    // B. Fallback: If requested class is 0 / sold out (no BOOK NOW button), click first available BOOK NOW button in target train card
-    if (!targetBookBtn && bookButtons.length > 0) {
-      targetBookBtn = bookButtons[0] as HTMLElement;
-    }
-
-    if (!targetBookBtn && allButtons.length > 0) {
-      targetBookBtn = allButtons[0] as HTMLElement;
+    // C. Fallback B: Any pure button (NOT <a> link) inside matchedCard
+    if (!targetBookBtn) {
+      const pureButtons = Array.from(matchedCard.querySelectorAll('button, input[type="button"], input[type="submit"]'));
+      if (pureButtons.length > 0) {
+        targetBookBtn = pureButtons[0] as HTMLElement;
+      }
     }
 
     if (targetBookBtn) {
