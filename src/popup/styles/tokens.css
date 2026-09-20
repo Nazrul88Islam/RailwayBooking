@@ -1,0 +1,73 @@
+:root {
+  --bg-dark: #0b0e14;
+  --bg-card: #141a24;
+  --bg-card-hover: #1b2330;
+  --bg-input: #1a2230;
+  --bg-input-focus: #212c3e;
+  
+  --border-color: #232d3f;
+  --border-glow: #00f2fe40;
+  
+  --text-primary: #f0f4f8;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  
+  --accent-cyan: #00f2fe;
+  --accent-cyan-light: #38ef7d;
+  --accent-cyan-bg: rgba(0, 242, 254, 0.08);
+  
+  --btn-primary-bg: linear-gradient(135deg, #ff4b2b 0%, #ff416c 100%);
+  --btn-primary-hover: linear-gradient(135deg, #ff5b3f 0%, #ff517c 100%);
+  --btn-stop-bg: linear-gradient(135deg, #dc2626 0%, #991b1b 100%);
+  --btn-pause-bg: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  
+  --status-ready: #00f2fe;
+  --status-running: #10b981;
+  --status-warning: #f59e0b;
+  --status-error: #ef4444;
+  
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  
+  --shadow-card: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-btn: 0 4px 14px rgba(255, 75, 43, 0.35);
+  
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 390px;
+  height: 650px;
+  max-height: 700px;
+  background-color: var(--bg-dark);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.4;
+  user-select: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-dark);
+}
+::-webkit-scrollbar-thumb {
+  background: #232d3f;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}

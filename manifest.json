@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Railway Ticket Booking Tools",
+  "version": "2.0.0",
+  "description": "Smart automation tool for Bangladesh Railway ticket booking with human pacing and adjacent seat detection.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://eticket.railway.gov.bd/*",
+    "https://*.railway.gov.bd/*"
+  ],
+  "action": {
+    "default_popup": "index.html",
+    "default_title": "Railway Ticket Booking Tools"
+  },
+  "background": {
+    "service_worker": "background/serviceWorker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://eticket.railway.gov.bd/*",
+        "https://*.railway.gov.bd/*"
+      ],
+      "js": [
+        "content/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
