@@ -360,21 +360,31 @@ export class RailwayAdapter {
 
     // 4. Search for class sub-blocks & BOOK NOW button inside the target train card
     const targetClassQuery = seatClass.toUpperCase().trim();
-    const allButtons = Array.from(matchedCard.querySelectorAll('button, a, .btn-book-now'));
-    const bookButtons = allButtons.filter(btn => (btn.textContent || '').toUpperCase().includes('BOOK'));
+    const allButtons = Array.from(matchedCard.querySelectorAll('button, a, input[type="button"], input[type="submit"], .btn-book-now, [class*="book"]'));
+    const bookButtons = allButtons.filter(btn => {
+      const text = (btn.textContent || (btn as HTMLInputElement).value || '').toUpperCase();
+      return text.includes('BOOK') || text.includes('SELECT') || text.includes('PURCHASE');
+    });
 
     let targetBookBtn: HTMLElement | null = null;
 
-    // Check if button's parent block contains requested class name (e.g. S_CHAIR / SNIGDHA)
+    // A. Check if any BOOK NOW button belongs to a parent container matching requested seatClass (e.g. SNIGDHA, AC_S, S_CHAIR)
     for (const btn of bookButtons) {
-      const parentText = (btn.parentElement?.parentElement?.textContent || btn.parentElement?.textContent || '').toUpperCase();
-      if (parentText.includes(targetClassQuery)) {
-        targetBookBtn = btn as HTMLElement;
-        break;
+      let parent: HTMLElement | null = btn.parentElement;
+      let depth = 0;
+      while (parent && parent !== matchedCard && depth < 4) {
+        const text = (parent.textContent || '').toUpperCase();
+        if (text.includes(targetClassQuery)) {
+          targetBookBtn = btn as HTMLElement;
+          break;
+        }
+        parent = parent.parentElement;
+        depth++;
       }
+      if (targetBookBtn) break;
     }
 
-    // Fallback to first available BOOK NOW button inside target train card
+    // B. Fallback: If requested class is 0 / sold out (no BOOK NOW button), click first available BOOK NOW button in target train card
     if (!targetBookBtn && bookButtons.length > 0) {
       targetBookBtn = bookButtons[0] as HTMLElement;
     }
