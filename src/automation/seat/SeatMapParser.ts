@@ -3,28 +3,32 @@ import { SeatInfo, CoachSeatMap } from './SeatTypes';
 /**
  * Seat status detection.
  *
- * The Railway legend has FOUR states: Available, Selected, In Progress, Booked.
- * Only "Available" seats may be picked. "In Progress" (held by someone else) and "Booked"
- * must never be treated as available. If the site uses class names that are not covered by
- * these patterns, add them here — this is the one place to tune.
+ * The Railway legend has FOUR states: Available (white, navy border), Selected (navy),
+ * In Progress (green) and Booked (orange). Booked / In Progress seats are DISABLED in the
+ * page's DOM — that real disabled state is the primary signal (see isDomDisabled), then class
+ * names (below), then the drawn colour. Only "Available" seats may ever be picked.
+ *
+ * The parser only READS the page. It never writes attributes/classes onto Railway's elements
+ * (an earlier version did, and then read its own marks back as "booked").
  */
-const BOOKED_RE = /booked|occupied|sold|taken|unavailable|disabled|blocked|orange|bg-orange|booked-seat|disabled-seat/;
-const IN_PROGRESS_RE = /progress|pending|processing|on[-_ ]?hold|(^|[\s_-])hold(ing)?($|[\s_-])|reserved|locked|green|bg-green/;
+const BOOKED_RE = /booked|occupied|sold|taken|unavailable|disabled|blocked/;
+const IN_PROGRESS_RE = /progress|pending|processing|on[-_ ]?hold|(^|[\s_-])hold(ing)?($|[\s_-])|reserved|locked/;
 const SELECTED_RE = /(^|[\s_-])selected($|[\s_-])/;
 const ACTIVE_RE = /(^|[\s_-])(active|chosen|checked)($|[\s_-])/;
 const AVAILABLE_RE = /(^|[\s_-])available($|[\s_-])/;
 
-/** Where a seat number can live. The site shows it in a hover tooltip, i.e. usually an attribute. */
+/** Where a seat number can live: attributes / tooltip attributes first, then visible text. */
 const SEAT_CODE_ATTRS = [
   'data-seat-name', 'data-seat', 'data-seat-number',
   'title', 'data-original-title', 'data-bs-original-title',
   'data-title', 'data-tooltip', 'data-tip', 'data-content', 'aria-label', 'alt'
 ];
-
 const DIRECT_CODE_ATTRS = ['data-seat-name', 'data-seat', 'data-seat-number'];
 
 const SEAT_CODE_FULL_RE = /^([A-Z\u0980-\u09FF]{1,5}[-_\s]?)?\d{1,3}[A-Z]?(?:\(B\))?$/i;
 const SEAT_CODE_EMBEDDED_RE = /([A-Z\u0980-\u09FF]{1,5}\s?-\s?\d{1,3}[A-Z]?)/i;
+/** "KHA-1", "CHA-25": coach prefix + hyphen + number — what the real seat labels look like. */
+const STRICT_CODE_RE = /^[A-Z\u0980-\u09FF]{1,5}-\d{1,3}$/i;
 
 interface Rect {
   left: number;
@@ -33,73 +37,63 @@ interface Rect {
   height: number;
 }
 
+type ColorState = 'booked' | 'progress' | 'selected' | null;
+
 export class SeatMapParser {
   /**
-   * Updates DOM attributes on page to reflect whether a seat element can be selected by DOM.
-   * If unavailable, sets attributes and classes marking disabled DOM selection.
+   * Seat class being booked (e.g. "AC_S"). Only used to guess the grid when the page is not
+   * laid out (so seat positions cannot be measured).
    */
-  public static applyDOMSelectionState(el: HTMLElement | Element, isAvailable: boolean): void {
-    if (!el || typeof el.setAttribute !== 'function') return;
+  public static seatClassHint = '';
 
-    if (!isAvailable) {
-      el.setAttribute('data-dom-selectable', 'false');
-      el.setAttribute('aria-disabled', 'true');
-      if (el.classList) {
-        el.classList.add('dom-selection-disabled');
-      }
-    } else {
-      el.setAttribute('data-dom-selectable', 'true');
-      if (el.getAttribute('aria-disabled') === 'true' && !el.hasAttribute('disabled')) {
-        el.removeAttribute('aria-disabled');
-      }
-      if (el.classList) {
-        el.classList.remove('dom-selection-disabled');
-      }
-    }
-  }
+  // ────────────────────────────────────────────────────────────────────────
+  // Main parse
+  // ────────────────────────────────────────────────────────────────────────
 
   /**
-   * Returns true if DOM can touch and select this seat element.
-   * Returns false if seat is unavailable, booked, in progress, selected, or marked disabled.
-   */
-  public static canDOMSelect(el: HTMLElement | Element): boolean {
-    if (!el) return false;
-    const domAttr = el.getAttribute('data-dom-selectable');
-    if (domAttr === 'false') return false;
-    const st = this.classify(el);
-    return !st.booked && !st.inProgress && !st.selected;
-  }
-
-  /**
-   * Parse seat elements from the live seat page (or a simulated DOM for unit tests).
-   * Only the coach currently shown in the "Select Coach" dropdown is on the page, so the
-   * result normally contains one CoachSeatMap.
+   * Parse the seats of the coach currently shown on the seat page.
+   * Only the seat GRID is parsed — never the "Seat Details" cart, the legend, or any table.
    */
   public static parseFromDOM(container: HTMLElement | Document = document): CoachSeatMap[] {
+    const coachSelect = this.findCoachSelectElement(container);
     const defaultCoachName = this.detectCoachName(container);
+    const cartPanel = this.findSeatDetailsPanel(container, coachSelect);
 
     // 1. Candidate elements
     const candidateSelectors = [
       '.seat-layout *', '.seat-plan *', '#seat_map *', '[class*="seat-grid"] *',
       '[class*="seat-layout"] *', '[class*="seat-view"] *', '[class*="coach-layout"] *',
-      '[class*="seat-matrix"] *', '[class*="seats-container"] *', '[class*="seat-details"] *',
+      '[class*="seat-matrix"] *', '[class*="seats-container"] *',
       '.all-seats *', '.seat-available', '.seat-booked', '.seat-selected', '[data-seat-name]',
       '[data-seat]', 'button[class*="seat"]', 'div[class*="seat-item"]', '.coach-seat-btn',
-      '.seat-details', '.single-seat', '[class*="seat" i]'
+      '.single-seat', '[class*="seat" i]'
     ];
 
     let rawElements = Array.from(container.querySelectorAll(candidateSelectors.join(', '))) as HTMLElement[];
-    if (rawElements.length === 0) {
+    // No recognisable seat classes → look at every small element (filtered strictly below)
+    if (!rawElements.some(el => this.isStrictSeatCode(this.extractSeatCode(el)))) {
       rawElements = Array.from(container.querySelectorAll('button, div, span, li, a, td')) as HTMLElement[];
     }
 
-    // 2. Keep only individual seats
-    let seatElements = rawElements.filter(el => this.looksLikeSeat(el));
+    // 2. Keep only individual seats — never the cart panel / cart table / legend
+    let seatElements = rawElements.filter(el => !this.isExcluded(el, cartPanel) && this.looksLikeSeat(el));
 
-    // 3. A seat is often `<button class="seat-x"><span>12</span></button>` — keep ONE element per seat
+    // 3. A seat is often `<button><span>12</span></button>` — keep ONE element per seat
     seatElements = this.dedupeNested(seatElements);
 
-    // 4. Build SeatInfo
+    // 4. Real seat labels are "KHA-12". If any exist, ignore bare numbers (prices, counters…)
+    const strict = seatElements.filter(el => this.isStrictSeatCode(this.extractSeatCode(el)));
+    if (strict.length > 0) seatElements = strict;
+
+    // 5. Only seats of the coach selected in the dropdown (drops stale seats mid-switch)
+    if (defaultCoachName !== 'COACH-1') {
+      const sameCoach = seatElements.filter(
+        el => this.extractCoachPrefixFromSeatCode(this.extractSeatCode(el) || '') === defaultCoachName
+      );
+      if (sameCoach.length > 0) seatElements = sameCoach;
+    }
+
+    // 6. Build SeatInfo
     const groups: Map<string, { seat: SeatInfo; rect: Rect }[]> = new Map();
 
     seatElements.forEach((el, index) => {
@@ -109,6 +103,8 @@ export class SeatMapParser {
       const coachName =
         el.getAttribute('data-coach') ||
         el.closest('[data-coach-name]')?.getAttribute('data-coach-name') ||
+        (defaultCoachName !== 'COACH-1' ? defaultCoachName : null) ||
+        this.extractCoachPrefixFromSeatCode(seatName) ||
         defaultCoachName;
 
       const rectRaw = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
@@ -122,18 +118,15 @@ export class SeatMapParser {
       const st = this.classify(el);
       const isAvailable = !st.booked && !st.inProgress && !st.selected;
 
-      // Update DOM element visual & attribute state for DOM selection
-      this.applyDOMSelectionState(el, isAvailable);
-
-      const seatsPerRow = this.detectSeatsPerRow(coachName, container);
-      const defaultGrid = this.deriveGridFromSeatCode(seatName, index, seatsPerRow);
+      const seatsPerRow = this.detectSeatsPerRow(coachName);
+      const fallbackGrid = this.deriveGridFromSeatCode(seatName, index, seatsPerRow);
 
       const seat: SeatInfo = {
         id: `${coachName}_${seatName}`,
         name: seatName,
         coach: coachName,
-        row: defaultGrid.row,
-        col: defaultGrid.col,
+        row: fallbackGrid.row, // overwritten by measured geometry when available
+        col: fallbackGrid.col,
         // ONLY "Available" seats are pickable. Booked / In Progress / already-Selected are not.
         isAvailable,
         isSelected: st.selected || st.active,
@@ -163,96 +156,88 @@ export class SeatMapParser {
   }
 
   // ────────────────────────────────────────────────────────────────────────
-  // Coach name
+  // "Seat Details" cart — the authoritative list of what is currently selected
   // ────────────────────────────────────────────────────────────────────────
 
   /**
-   * Detect expected seats per row for fallback grid assignment based on coach name or seat class.
-   *  - AC_B / F_BERTH (First Berth / AC Berth): 2 seats per row
-   *  - AC_S (AC Seat / Sleeper 3-berth): 3 seats per row
-   *  - Standard Chair car (S_CHAIR, SNIGDHA, etc.): 4 seats per row
+   * Seat codes currently listed in the "Seat Details" table (across ALL coaches), e.g.
+   * ['KA-6', 'TA-7']. Returns null when the panel cannot be found (then callers must fall back
+   * to looking at the seat grid).
+   *
+   * Railway keeps selected seats when you switch coach, so this — not the grid of the coach on
+   * screen — is the only reliable answer to "which seats will I actually be buying?".
    */
-  public static detectSeatsPerRow(coachName: string = '', container?: HTMLElement | Document | null): number {
-    const name = (coachName || '').toUpperCase();
+  public static readSeatDetailsCart(container: HTMLElement | Document = document): string[] | null {
+    const coachSelect = this.findCoachSelectElement(container);
+    const panel = this.findSeatDetailsPanel(container, coachSelect);
+    if (!panel) return null;
 
-    let activeClass = '';
-    const targetDoc = container || (typeof document !== 'undefined' ? document : null);
-    if (targetDoc && typeof (targetDoc as any).querySelectorAll === 'function') {
-      const selectElements = Array.from((targetDoc as any).querySelectorAll('select')) as HTMLSelectElement[];
-      for (const sel of selectElements) {
-        const selectedOpt = sel.selectedOptions ? sel.selectedOptions[0] : sel.options[sel.selectedIndex];
-        if (selectedOpt) {
-          const txt = (selectedOpt.text || selectedOpt.value).toUpperCase();
-          if (txt.includes('AC_B') || txt.includes('AC B') || txt.includes('BERTH')) {
-            activeClass = 'AC_B';
-            break;
-          }
-          if (txt.includes('AC_S') || txt.includes('AC S')) {
-            activeClass = 'AC_S';
-            break;
-          }
-        }
-      }
-    }
+    const scope = (panel.querySelector('table') || panel).cloneNode(true) as HTMLElement;
+    scope.querySelectorAll('select, option, thead').forEach(n => n.remove());
 
-    const check = `${name} ${activeClass}`;
-
-    if (/AC[-_]?B|F[-_]?BERTH|BERTH|2[-_]?SEAT/i.test(check)) {
-      return 2;
+    // Join cell by cell: plain textContent glues cells together ("S_CHAIR" + "KA-6" → "S_CHAIRKA-6")
+    const leaves = Array.from(scope.querySelectorAll('*')).filter(e => e.children.length === 0);
+    const text = leaves.length > 0
+      ? leaves.map(e => (e.textContent || '').trim()).join(' | ')
+      : (scope.textContent || '');
+    const codes: string[] = [];
+    const re = /\b([A-Z]{1,5})-(\d{1,3})(?!\d)/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const code = `${m[1]}-${m[2]}`.toUpperCase();
+      if (!codes.includes(code)) codes.push(code);
     }
-    if (/AC[-_]?S|SLEEPER|3[-_]?SEAT/i.test(check)) {
-      return 3;
-    }
-    return 4;
+    return codes;
   }
 
   /**
-   * Derive stable row & column from seat number code when layout geometry is not available.
-   * Recognises BD Railway standard layouts (Row 1 has 3 seats: 1-2 left, 3 right; Row 2+ has 4 seats).
+   * The right-hand "Seat Details" panel: the biggest ancestor of its heading that does NOT also
+   * contain the coach dropdown (so it never swallows the seat grid).
    */
-  public static deriveGridFromSeatCode(seatName: string, index: number, seatsPerRow: number): { row: number; col: number } {
-    const match = seatName.match(/\d+/);
-    if (!match) {
-      return {
-        row: Math.floor(index / seatsPerRow) + 1,
-        col: (index % seatsPerRow) + 1
-      };
+  public static findSeatDetailsPanel(
+    container: HTMLElement | Document,
+    coachSelect?: HTMLElement | null
+  ): HTMLElement | null {
+    const candidates = Array.from(
+      container.querySelectorAll('h1,h2,h3,h4,h5,h6,p,div,span,strong,b,label,legend,caption,th')
+    ) as HTMLElement[];
+    const heading = candidates.find(
+      el => el.children.length === 0 && /^seat details$/i.test((el.textContent || '').trim())
+    );
+    if (!heading) return null;
+
+    let panel: HTMLElement = heading;
+    let levels = 0;
+    while (panel.parentElement && panel.parentElement !== document.body && panel.parentElement !== document.documentElement) {
+      const parent: HTMLElement = panel.parentElement;
+      if (coachSelect ? parent.contains(coachSelect) : levels >= 3) break;
+      panel = parent;
+      levels++;
     }
+    return panel;
+  }
 
-    const num = parseInt(match[0], 10);
-
-    if (seatsPerRow === 4) {
-      // BD Railway standard chair car (Row 1: 1, 2, 3; Row 2+: 4,5,6,7 / 8,9,10,11 ...)
-      if (num === 1) return { row: 1, col: 1 };
-      if (num === 2) return { row: 1, col: 2 };
-      if (num === 3) return { row: 1, col: 4 };
-
-      if (num >= 4) {
-        const offset = (num - 4) % 4;
-        const r = 2 + Math.floor((num - 4) / 4);
-        const c = offset < 2 ? offset + 1 : offset + 2; // offset 0->col 1, 1->col 2, 2->col 4 (aisle gap), 3->col 5
-        return { row: r, col: c };
-      }
+  private static isExcluded(el: Element, cartPanel: HTMLElement | null): boolean {
+    if (cartPanel && (cartPanel === el || cartPanel.contains(el))) return true;
+    const table = el.closest('table');
+    if (table) {
+      const t = (table.textContent || '').toLowerCase();
+      if (t.includes('fare') && /class|seats?/.test(t)) return true; // the cart table
     }
+    return false;
+  }
 
-    if (seatsPerRow === 3) {
-      // AC_S 3-berth layout (Row 1: 1, 2, 3; Row 2: 4, 5, 6 ...)
-      const r = Math.floor((num - 1) / 3) + 1;
-      const c = ((num - 1) % 3) + 1;
-      return { row: r, col: c };
-    }
+  // ────────────────────────────────────────────────────────────────────────
+  // Coach name
+  // ────────────────────────────────────────────────────────────────────────
 
-    if (seatsPerRow === 2) {
-      // AC_B 2-berth layout (Row 1: 1, 2; Row 2: 3, 4 ...)
-      const r = Math.floor((num - 1) / 2) + 1;
-      const c = ((num - 1) % 2) + 1;
-      return { row: r, col: c };
-    }
-
-    return {
-      row: Math.floor((num - 1) / seatsPerRow) + 1,
-      col: ((num - 1) % seatsPerRow) + 1
-    };
+  private static findCoachSelectElement(container: HTMLElement | Document): HTMLSelectElement | null {
+    const selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[];
+    return (
+      selects.find(sel =>
+        Array.from(sel.options).some(o => /SEAT|COACH|BOGIE|BOGEY/i.test(o.text || o.value || ''))
+      ) || null
+    );
   }
 
   private static detectCoachName(container: HTMLElement | Document): string {
@@ -277,9 +262,25 @@ export class SeatMapParser {
     return name;
   }
 
+  /** "KA-6" → "KA", "THA-15" → "THA". Returns null for synthetic names like "S-1". */
+  public static extractCoachPrefixFromSeatCode(seatCode: string): string | null {
+    if (!seatCode) return null;
+    const m = seatCode.match(/^([A-Z\u0980-\u09FF]+)[-_ ]?\d+/i);
+    if (m && m[1]) {
+      const prefix = m[1].toUpperCase();
+      if (prefix === 'S') return null;
+      return prefix;
+    }
+    return null;
+  }
+
   // ────────────────────────────────────────────────────────────────────────
   // Seat recognition
   // ────────────────────────────────────────────────────────────────────────
+
+  private static isStrictSeatCode(code: string | null): boolean {
+    return !!code && STRICT_CODE_RE.test(code);
+  }
 
   /** Normalise a raw string into a seat code like "GA-12", or null. */
   private static normalizeCode(raw: string | null | undefined, allowEmbedded: boolean): string | null {
@@ -298,7 +299,7 @@ export class SeatMapParser {
     return null;
   }
 
-  /** Read the seat number from data-attrs / tooltip attrs first, then visible text. */
+  /** Read the seat number from data-attrs / tooltip attrs first, then visible text ("KHA-1"). */
   private static extractSeatCode(el: HTMLElement): string | null {
     for (const attr of DIRECT_CODE_ATTRS) {
       const v = el.getAttribute(attr);
@@ -311,30 +312,87 @@ export class SeatMapParser {
     return this.normalizeCode(el.textContent, false);
   }
 
+  // ────────────────────────────────────────────────────────────────────────
+  // Seat state (read-only)
+  // ────────────────────────────────────────────────────────────────────────
+
+  /**
+   * True if the page itself treats this seat as not clickable: `disabled` attribute / :disabled,
+   * aria-disabled from the site, or CSS that blocks the pointer.
+   */
+  private static isDomDisabled(el: Element): boolean {
+    if (el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true') return true;
+    try {
+      if (el.matches(':disabled')) return true;
+    } catch { /* selector unsupported */ }
+
+    const parent = el.parentElement;
+    if (parent && (parent.hasAttribute('disabled') || parent.getAttribute('aria-disabled') === 'true')) return true;
+    if (el.querySelector('input:disabled, button:disabled')) return true;
+
+    if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+      try {
+        const cs = window.getComputedStyle(el as HTMLElement);
+        if (cs.pointerEvents === 'none' || cs.cursor === 'not-allowed') return true;
+      } catch { /* ignore */ }
+    }
+    return false;
+  }
+
+  /** Legend colours: orange = booked, green = in progress, navy fill = selected. */
+  private static colorState(el: Element): ColorState {
+    if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') return null;
+    let bg = '';
+    try {
+      bg = window.getComputedStyle(el as HTMLElement).backgroundColor || '';
+    } catch {
+      return null;
+    }
+    const m = bg.match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?/i);
+    if (!m) return null;
+    const r = +m[1], g = +m[2], b = +m[3];
+    const a = m[4] !== undefined ? parseFloat(m[4]) : 1;
+    if (a < 0.5) return null;
+
+    if (r >= 190 && g >= 90 && g <= 190 && b <= 110 && r - b >= 100) return 'booked';      // orange
+    if (g >= 110 && r <= 150 && b <= 100 && g - r >= 30 && g - b >= 50) return 'progress';   // green
+    if (r <= 100 && g <= 110 && b <= 140 && b - r >= 15 && r + g + b < 330) return 'selected'; // navy
+    return null;
+  }
+
   public static classify(el: Element) {
     const cls = (el.getAttribute('class') || '').toLowerCase();
-    const attrs = ['data-status', 'data-state', 'data-seat-status', 'title', 'data-original-title', 'aria-label', 'style', 'color']
+    const attrs = ['data-status', 'data-state', 'data-seat-status', 'title', 'data-original-title', 'aria-label']
       .map(a => (el.getAttribute(a) || '').toLowerCase())
       .join(' ');
     const all = `${cls} ${attrs}`.replace(/un-?selected|not[-_ ]selected/g, ' ');
+    const color = this.colorState(el);
 
-    const booked =
-      BOOKED_RE.test(all) ||
-      el.hasAttribute('disabled') ||
-      el.getAttribute('aria-disabled') === 'true' ||
-      el.getAttribute('data-dom-selectable') === 'false';
+    const booked = BOOKED_RE.test(all) || this.isDomDisabled(el) || color === 'booked';
+    const inProgress = IN_PROGRESS_RE.test(all) || color === 'progress';
 
-    const inProgress = IN_PROGRESS_RE.test(all);
-
+    const input = el.matches('input') ? (el as HTMLInputElement) : (el.querySelector('input') as HTMLInputElement | null);
     const selected =
       SELECTED_RE.test(all) ||
       el.getAttribute('aria-pressed') === 'true' ||
-      el.getAttribute('aria-checked') === 'true';
+      el.getAttribute('aria-checked') === 'true' ||
+      !!(input && input.checked) ||
+      color === 'selected';
 
     const active = ACTIVE_RE.test(cls);
     const hasAvailableClass = AVAILABLE_RE.test(cls);
 
     return { booked, inProgress, selected, active, hasAvailableClass };
+  }
+
+  /**
+   * Read-only check used right before clicking: does the live element look clickable
+   * (not disabled, not booked, not in progress, not already selected)?
+   */
+  public static canDOMSelect(el: HTMLElement | Element): boolean {
+    if (!el) return false;
+    const st = this.classify(el);
+    return !st.booked && !st.inProgress && !st.selected;
   }
 
   private static looksLikeSeat(el: HTMLElement): boolean {
@@ -391,18 +449,58 @@ export class SeatMapParser {
   // ────────────────────────────────────────────────────────────────────────
 
   /**
+   * Expected seats per row when the page cannot be measured:
+   *   AC_B → 2 per row,  AC_S → 3 per row,  chair cars (S_CHAIR, SNIGDHA, …) → 4 per row.
+   */
+  public static detectSeatsPerRow(coachName: string = ''): number {
+    const hint = `${this.seatClassHint} ${coachName}`.toUpperCase();
+    if (/AC[-_ ]?B(?![A-Z])|F[-_ ]?BERTH|BERTH/.test(hint)) return 2;
+    if (/AC[-_ ]?S(?![A-Z])|SLEEPER/.test(hint)) return 3;
+    return 4;
+  }
+
+  /**
+   * Row/col from the seat number when geometry is unavailable.
+   * Chair car: row 1 = 1,2 | 3 ; then 4 per row (4,5 | 6,7 ; 8,9 | 10,11 …) — matches the real map.
+   */
+  public static deriveGridFromSeatCode(seatName: string, index: number, seatsPerRow: number): { row: number; col: number } {
+    const match = seatName.match(/\d+/);
+    if (!match) {
+      return { row: Math.floor(index / seatsPerRow) + 1, col: (index % seatsPerRow) + 1 };
+    }
+    const num = parseInt(match[0], 10);
+
+    if (seatsPerRow === 4) {
+      if (num === 1) return { row: 1, col: 1 };
+      if (num === 2) return { row: 1, col: 2 };
+      if (num === 3) return { row: 1, col: 5 };
+      if (num >= 4) {
+        const offset = (num - 4) % 4;
+        const r = 2 + Math.floor((num - 4) / 4);
+        const c = offset < 2 ? offset + 1 : offset + 2; // 0→1, 1→2, 2→4 (aisle gap), 3→5
+        return { row: r, col: c };
+      }
+    }
+
+    return {
+      row: Math.floor((num - 1) / seatsPerRow) + 1,
+      col: ((num - 1) % seatsPerRow) + 1
+    };
+  }
+
+  /**
    * Derive row/col from where each seat is actually drawn.
    *
-   *  - rows  = seats whose top edge is (nearly) the same
-   *  - cols  = horizontal position divided by the seat pitch, so an AISLE leaves a gap
-   *            in the numbering (2 | 4). "Adjacent" (col diff === 1) therefore never
-   *            pairs seats on opposite sides of the aisle.
+   *  - rows: seats with (nearly) the same top edge. A bigger vertical gap (compartment break)
+   *          leaves a gap in the row numbers, so seats across it are never "next rows".
+   *  - cols: horizontal position ÷ seat pitch. An AISLE leaves a gap in the numbering, so
+   *          "adjacent" (col diff === 1) never pairs seats on opposite sides of it.
    *
-   * Falls back to "4 per row in DOM order" when the page is not laid out (hidden tab, tests).
+   * Falls back to seat-number based grid when the page is not laid out.
    */
   private static assignGrid(items: { seat: SeatInfo; rect: Rect }[]): void {
     const measurable = items.filter(i => i.rect.width > 0 && i.rect.height > 0);
-    if (items.length === 0 || measurable.length < Math.ceil(items.length * 0.8)) return; // keep index-based grid
+    if (items.length === 0 || measurable.length < Math.ceil(items.length * 0.8)) return;
 
     const median = (arr: number[]) => {
       const s = [...arr].sort((a, b) => a - b);
@@ -411,19 +509,36 @@ export class SeatMapParser {
     const medianH = median(measurable.map(i => i.rect.height));
     const medianW = median(measurable.map(i => i.rect.width));
 
+    type Item = { seat: SeatInfo; rect: Rect };
     const sorted = [...measurable].sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
-    const rows: { top: number; items: { seat: SeatInfo; rect: Rect }[] }[] = [];
+    const rows: { top: number; items: Item[] }[] = [];
 
     for (const it of sorted) {
       const last = rows[rows.length - 1];
-      if (last && Math.abs(it.rect.top - last.top) <= Math.max(12, medianH * 0.6)) {
+      if (last && Math.abs(it.rect.top - last.top) <= Math.max(6, medianH * 0.5)) {
         last.items.push(it);
       } else {
         rows.push({ top: it.rect.top, items: [it] });
       }
     }
 
-    // pitch = the smallest horizontal step between neighbouring seats (aisles are bigger steps)
+    // ── rows (with gaps) ──
+    const dys: number[] = [];
+    for (let i = 1; i < rows.length; i++) {
+      const dy = rows[i].top - rows[i - 1].top;
+      if (dy > 2) dys.push(dy);
+    }
+    const rowPitch = Math.max(dys.length ? Math.min(...dys) : medianH, 1);
+    let rowNo = 1;
+    rows.forEach((r, i) => {
+      if (i > 0) {
+        const gap = r.top - rows[i - 1].top;
+        rowNo += gap <= rowPitch * 1.4 ? 1 : Math.max(2, Math.round(gap / rowPitch));
+      }
+      r.items.forEach(it => { it.seat.row = rowNo; });
+    });
+
+    // ── columns (with aisle gaps) ──
     const steps: number[] = [];
     rows.forEach(r => {
       r.items.sort((a, b) => a.rect.left - b.rect.left);
@@ -435,11 +550,19 @@ export class SeatMapParser {
     const pitch = Math.max(steps.length ? Math.min(...steps) : medianW, medianW * 0.5, 1);
     const minLeft = Math.min(...measurable.map(i => i.rect.left));
 
-    rows.forEach((r, rowIdx) => {
+    rows.forEach(r => {
       r.items.forEach(it => {
-        it.seat.row = rowIdx + 1;
         it.seat.col = 1 + Math.round((it.rect.left - minLeft) / pitch);
       });
+      // Guarantee a visible gap (aisle) always shows up as a gap in the numbering
+      for (let i = 1; i < r.items.length; i++) {
+        const dx = r.items[i].rect.left - r.items[i - 1].rect.left;
+        const diff = r.items[i].seat.col - r.items[i - 1].seat.col;
+        if (dx > pitch * 1.4 && diff < 2) {
+          const shift = 2 - diff;
+          for (let j = i; j < r.items.length; j++) r.items[j].seat.col += shift;
+        }
+      }
     });
   }
 
@@ -449,8 +572,7 @@ export class SeatMapParser {
 
   /**
    * Text picture of a parsed coach, one line per row: `name` = available, `name*` = selected,
-   * `namex` = booked / in progress, `|` = aisle. Log this to verify the parser matches
-   * what you see on the page.
+   * `namex` = booked / in progress, `|` = aisle or gap.
    */
   public static formatGrid(coach: CoachSeatMap): string {
     const rows = new Map<number, SeatInfo[]>();

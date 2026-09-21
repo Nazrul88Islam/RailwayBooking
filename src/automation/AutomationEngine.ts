@@ -119,6 +119,7 @@ export class AutomationEngine {
     const signal = this.abortController.signal;
 
     try {
+      SeatMapParser.seatClassHint = this.settings.seatClass || '';
       this.onLog('Automation engine initialized', 'info');
       this.onStateChange(AutomationState.STARTING, 'Starting booking process...');
 
@@ -167,8 +168,8 @@ export class AutomationEngine {
       const selectedSeats = await this.chooseAndSelectSeats(signal);
       if (!selectedSeats) return; // error already reported
 
-      // ── STEP 7: Continue + final safety check ──────────────────────────────
-      await this.continueToNextStep(selectedSeats.length, signal);
+      // ── STEP 7: final cart check → Continue → final safety check ───────────
+      await this.continueToNextStep(selectedSeats, signal);
     } catch (err: any) {
       if (err.message === 'Automation aborted by user') {
         this.onLog('Automation cancelled by user.', 'warning');
@@ -582,7 +583,7 @@ export class AutomationEngine {
       return { coachName: res.seats[0].coach, seats: res.seats, modeUsed: res.modeUsed, reason: res.reason };
     }
 
-    // ── Dropdown: scan coaches (prioritize currently selected coach first) ──
+    // ── Dropdown: scan coaches (the one already on screen first, then largest first) ──
     const currentCoachIdx = RailwayAdapter.getSelectedCoachIndex();
     const options = RailwayAdapter.getCoachOptions()
       .filter(o => o.available >= need)
@@ -671,7 +672,91 @@ export class AutomationEngine {
     return { coachName: best.opt.coachName, seats: best.res.seats, modeUsed: best.res.modeUsed, reason: best.res.reason };
   }
 
-  /** Did clicking `seat` visibly change it (selected class / any attribute)? Polls ~600ms. */
+  // ── The "Seat Details" table is the source of truth ─────────────────────
+  //
+  // Railway KEEPS selected seats when you switch coach, so seats from earlier attempts pile up
+  // in other coaches (e.g. KA-6 + TA-7 + THA-3). What we clicked in the current coach tells us
+  // nothing about that — only the Seat Details table does.
+
+  private readCart(): string[] | null {
+    return SeatMapParser.readSeatDetailsCart(document);
+  }
+
+  private async waitForCart(
+    predicate: (cart: string[]) => boolean,
+    timeoutMs: number,
+    signal: AbortSignal
+  ): Promise<boolean> {
+    const end = Date.now() + timeoutMs;
+    for (; ;) {
+      this.checkAborted(signal);
+      const cart = this.readCart();
+      if (cart === null) return false;
+      if (predicate(cart)) return true;
+      if (Date.now() >= end) return false;
+      await this.delay(150, signal);
+    }
+  }
+
+  private hasStrictCode(seat: SeatInfo): boolean {
+    return /^[A-Z\u0980-\u09FF]{1,5}-\d{1,3}$/i.test(seat.name);
+  }
+
+  /** Deselect one seat, wherever it is: switch to its coach, click it, wait until the cart drops it. */
+  private async deselectSeatByCode(code: string, signal: AbortSignal): Promise<boolean> {
+    const prefix = SeatMapParser.extractCoachPrefixFromSeatCode(code);
+    const opt = RailwayAdapter.getCoachOptions(true).find(o => o.coachName === prefix);
+    if (opt) await this.loadCoach(opt, new Set(), signal);
+
+    const seats = ([] as SeatInfo[]).concat(...SeatMapParser.parseFromDOM(document).map(m => m.seats));
+    const seat = seats.find(x => x.name.toUpperCase() === code.toUpperCase());
+    const el = seat?.rawElement as HTMLElement | undefined;
+    if (!el) {
+      this.onLog(`Could not find seat ${code} on the page to release it.`, 'warning');
+      return false;
+    }
+
+    el.click();
+    return this.waitForCart(c => !c.includes(code.toUpperCase()), 4000, signal);
+  }
+
+  /** Release EVERY seat listed in Seat Details (all coaches). Returns true when the cart is empty. */
+  private async clearCart(signal: AbortSignal): Promise<boolean> {
+    let cart = this.readCart();
+
+    if (cart === null) {
+      // No Seat Details panel found — best effort: only the coach on screen
+      RailwayAdapter.clearAllSelectedSeats();
+      return true;
+    }
+
+    for (let pass = 0; pass < 3 && cart.length > 0; pass++) {
+      this.onLog(`Releasing ${cart.length} seat(s) held in Seat Details: ${cart.join(', ')}`, 'warning');
+      for (const code of [...cart]) {
+        await this.deselectSeatByCode(code, signal);
+      }
+      cart = this.readCart() ?? [];
+    }
+    return cart.length === 0;
+  }
+
+  /** Compare the Seat Details table with the seats we meant to select. */
+  private verifySelection(expected: SeatInfo[]): { ok: boolean; unknown: boolean; missing: string[]; extras: string[]; cart: string[] } {
+    const cart = this.readCart();
+    if (cart === null) return { ok: true, unknown: true, missing: [], extras: [], cart: [] };
+
+    if (!expected.every(s => this.hasStrictCode(s))) {
+      const ok = cart.length === expected.length;
+      return { ok, unknown: false, missing: ok ? [] : ['(count mismatch)'], extras: [], cart };
+    }
+
+    const exp = expected.map(s => s.name.toUpperCase());
+    const missing = exp.filter(c => !cart.includes(c));
+    const extras = cart.filter(c => !exp.includes(c));
+    return { ok: missing.length === 0 && extras.length === 0 && cart.length === expected.length, unknown: false, missing, extras, cart };
+  }
+
+  /** Fallback when there is no Seat Details table: did clicking `seat` visibly change it? */
   private async confirmSeatClicked(seat: SeatInfo, htmlBefore: string, signal: AbortSignal): Promise<boolean> {
     for (let i = 0; i < 6; i++) {
       await this.delay(100, signal);
@@ -685,20 +770,25 @@ export class AutomationEngine {
     return false;
   }
 
-  /** Click each seat and verify it really changed. Returns which seats worked / failed. */
+  /** Click each seat and confirm it landed in Seat Details. Returns which seats worked / failed. */
   private async clickSeats(
     seats: SeatInfo[],
     signal: AbortSignal
   ): Promise<{ confirmed: SeatInfo[]; failed: SeatInfo[] }> {
     const confirmed: SeatInfo[] = [];
     const failed: SeatInfo[] = [];
+    const useCart = this.readCart() !== null && seats.every(s => this.hasStrictCode(s));
+
+    const confirm = async (seat: SeatInfo, before: string): Promise<boolean> =>
+      useCart
+        ? this.waitForCart(c => c.includes(seat.name.toUpperCase()), 4000, signal)
+        : this.confirmSeatClicked(seat, before, signal);
 
     for (const seat of seats) {
       this.checkAborted(signal);
 
-      // Verify seat is available according to SeatInfo metadata
       if (!seat.isAvailable) {
-        this.onLog(`Seat ${seat.name}: unavailable (DOM selection disabled for this seat).`, 'warning');
+        this.onLog(`Seat ${seat.name}: not available (booked / in progress / disabled on the page).`, 'warning');
         failed.push(seat);
         continue;
       }
@@ -710,24 +800,23 @@ export class AutomationEngine {
         continue;
       }
 
-      // Verify live DOM element is selectable and not disabled/booked/in-progress
+      // The page's own disabled state is the final word: a disabled seat cannot be selected
       if (!SeatMapParser.canDOMSelect(el)) {
-        SeatMapParser.applyDOMSelectionState(el, false);
-        this.onLog(`Seat ${seat.name}: live DOM element shows disabled selection state. Cannot touch/select.`, 'warning');
+        this.onLog(`Seat ${seat.name}: disabled on the page right now — cannot be selected.`, 'warning');
         failed.push(seat);
         continue;
       }
 
       const before = el.outerHTML;
       el.click();
-      let ok = await this.confirmSeatClicked(seat, before, signal);
+      let ok = await confirm(seat, before);
 
       if (!ok) {
-        // Nothing changed at all → the click was swallowed; try once more (safe: no state change seen)
+        // Seat is not in the cart → it is NOT selected, so a second click is safe
         el = this.resolveSeatElement(seat);
-        if (el && SeatMapParser.canDOMSelect(el) && el.outerHTML === before) {
+        if (el && SeatMapParser.canDOMSelect(el) && (useCart || el.outerHTML === before)) {
           el.click();
-          ok = await this.confirmSeatClicked(seat, before, signal);
+          ok = await confirm(seat, before);
         }
       }
 
@@ -743,14 +832,22 @@ export class AutomationEngine {
   }
 
   /**
-   * Plan → click → verify. If any seat cannot be selected the ones already selected are
-   * released and a new plan is made without the failed seats (max 3 rounds).
-   * Returns the selected seats, or null (error already reported).
+   * Clean start → plan → click → verify against Seat Details. If anything is off, EVERYTHING in
+   * the cart is released (all coaches) and a new plan is made without the failed seats
+   * (max 3 rounds). Returns the selected seats, or null (error already reported).
    */
   private async chooseAndSelectSeats(signal: AbortSignal): Promise<SeatInfo[] | null> {
     const need = this.seatCount;
     const excluded = new Set<string>();
     const maxRounds = 3;
+
+    // Seats left over from earlier attempts (any coach) would end up in the booking
+    if (!(await this.clearCart(signal))) {
+      return this.fail(
+        'Seats from an earlier attempt are still held in Seat Details and could not be released. Remove them manually, then start again.',
+        'Old seats are still selected — remove them and start again.'
+      );
+    }
 
     for (let round = 1; round <= maxRounds; round++) {
       this.checkAborted(signal);
@@ -769,21 +866,43 @@ export class AutomationEngine {
 
       const { confirmed, failed } = await this.clickSeats(plan.seats, signal);
 
-      if (failed.length === 0 && confirmed.length === need) {
-        return confirmed;
+      // Let Seat Details settle, then compare it with the plan
+      if (this.readCart() !== null) {
+        await this.waitForCart(c => c.length === plan.seats.length, 2500, signal);
+      }
+      const check = this.verifySelection(plan.seats);
+
+      if (failed.length === 0 && confirmed.length === need && check.ok) {
+        if (!check.unknown) {
+          this.onLog(`Seat Details confirms exactly ${need} seat(s): ${check.cart.join(', ')}`, 'success');
+        }
+        return plan.seats;
       }
 
-      // Never continue with a partial selection: release what we got, exclude failures, re-plan.
       this.onLog(
-        `Only ${confirmed.length}/${need} seat(s) could be selected (round ${round}/${maxRounds}). Releasing them and re-planning...`,
+        `Round ${round}/${maxRounds}: selection is not what was planned` +
+        (check.unknown ? '' : ` (Seat Details: ${check.cart.join(', ') || 'empty'}; missing: ${check.missing.join(', ') || '-'}; unexpected: ${check.extras.join(', ') || '-'})`) +
+        '. Releasing all selected seats and re-planning...',
         'warning'
       );
-      for (const seat of confirmed) {
-        const el = this.resolveSeatElement(seat);
-        if (el) el.click();
-        await this.delay(120, signal);
+
+      if (check.unknown) {
+        for (const seat of confirmed) {
+          const el = this.resolveSeatElement(seat);
+          if (el) el.click();
+          await this.delay(120, signal);
+        }
+      } else if (!(await this.clearCart(signal))) {
+        return this.fail(
+          'Could not release the seats from the failed attempt — stopping so no extra seats are booked.',
+          'Could not release extra seats — check Seat Details.'
+        );
       }
+
       failed.forEach(s => excluded.add(s.id));
+      plan.seats
+        .filter(s => check.missing.includes(s.name.toUpperCase()))
+        .forEach(s => excluded.add(s.id));
     }
 
     return this.fail(
@@ -796,8 +915,20 @@ export class AutomationEngine {
   // STEP 7 — Continue + final safety checks
   // ══════════════════════════════════════════════════════════════════════════
 
-  private async continueToNextStep(selectedCount: number, signal: AbortSignal): Promise<void> {
+  private async continueToNextStep(selectedSeats: SeatInfo[], signal: AbortSignal): Promise<void> {
+    const selectedCount = selectedSeats.length;
     await this.delay(this.settings.actionDelay, signal);
+
+    // Never continue unless Seat Details lists EXACTLY the seats we planned
+    const finalCheck = this.verifySelection(selectedSeats);
+    if (!finalCheck.ok) {
+      this.onLog(
+        `Seat Details shows [${finalCheck.cart.join(', ') || 'nothing'}] but expected exactly [${selectedSeats.map(s => s.name).join(', ')}]. Not continuing.`,
+        'error'
+      );
+      this.onStateChange(AutomationState.ERROR, 'Selected seats do not match the plan — not continuing.');
+      return;
+    }
 
     // Wait (up to 5s) for the Continue button to exist AND be enabled.
     let continueBtn: HTMLElement | null = null;

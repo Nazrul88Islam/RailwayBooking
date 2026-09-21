@@ -1,5 +1,6 @@
 import { RAILWAY_SELECTORS } from './selectors';
 import { BookingSettings } from '../../shared/types';
+import { SeatMapParser } from '../../automation/seat/SeatMapParser';
 
 /** One real entry of the "Select Coach" dropdown, e.g. "GA - 17 Seat(s)". */
 export interface CoachOption {
@@ -599,22 +600,34 @@ export class RailwayAdapter {
     const rawHref = el.getAttribute('href') || el.closest('a')?.getAttribute('href');
     if (!rawHref) return true; // Pure button / no href — pass through (text evidence is checked separately)
     const h = rawHref.toLowerCase().trim();
-    if (h === '' || h === '#' || h === 'javascript:void(0)' || h === 'javascript:;') return false;
-    if (h === '/' || h === '/#' || h === '/?' ||
-      h === 'https://eticket.railway.gov.bd' ||
-      h === 'https://eticket.railway.gov.bd/' ||
-      h === 'https://eticket.railway.gov.bd/#') return false;
-    if (h.startsWith('https://eticket.railway.gov.bd/?') || h.startsWith('/?')) return false;
+    if (h === '' || h === '#' || h === 'javascript:void(0)' || h === 'javascript:;' || h === 'javascript:') return false;
+
+    try {
+      const origin = typeof window !== 'undefined' && window.location ? window.location.origin : 'https://eticket.railway.gov.bd';
+      const url = new URL(rawHref, origin);
+      const path = url.pathname.toLowerCase();
+      // Reject root / homepage links
+      if (path === '/' || path === '' || path === '/index.html') return false;
+    } catch {
+      if (h === '/' || h === '/#' || h === '/?' ||
+        h === 'https://eticket.railway.gov.bd' ||
+        h === 'https://eticket.railway.gov.bd/' ||
+        h === 'https://eticket.railway.gov.bd/#') return false;
+      if (h.startsWith('https://eticket.railway.gov.bd/?') || h.startsWith('/?')) return false;
+    }
+
     return true;
   }
 
   /** All visible booking-intent buttons/links inside a container (enabled or not). */
   private static getBookingCandidates(container: HTMLElement): HTMLElement[] {
-    return (Array.from(container.querySelectorAll(this.CLICKABLE_SELECTOR)) as HTMLElement[]).filter(el =>
+    const raw = (Array.from(container.querySelectorAll(this.CLICKABLE_SELECTOR)) as HTMLElement[]).filter(el =>
       this.isBookingIntentElement(el) &&
       this.isValidBookingHref(el) &&
       this.isVisible(el)
     );
+    // Keep only innermost candidates so an outer <a href="/"> wrapping the train card is never chosen over its inner <button>
+    return raw.filter(a => !raw.some(b => b !== a && a.contains(b)));
   }
 
   /**
@@ -878,6 +891,34 @@ export class RailwayAdapter {
   }
 
   /**
+   * Deselect seats that are shown as selected in the coach currently on screen.
+   * (Fallback only — the engine normally clears the whole "Seat Details" cart, across coaches.)
+   * It never clicks anything outside the seat grid: a version that also clicked `.btn-close` /
+   * `.btn-remove` could close the booking panel.
+   */
+  public static clearAllSelectedSeats(): number {
+    let clearedCount = 0;
+    try {
+      const maps = SeatMapParser.parseFromDOM(document);
+      for (const map of maps) {
+        for (const seat of map.seats) {
+          if (seat.isSelected) {
+            const el = seat.rawElement as HTMLElement;
+            if (el && typeof el.click === 'function') {
+              console.log(`[Railway] Deselecting pre-selected seat: ${seat.name}`);
+              el.click();
+              clearedCount++;
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[Railway] Error parsing DOM for selected seats cleanup:', err);
+    }
+    return clearedCount;
+  }
+
+  /**
    * Click unselected coach tab/button to load coach seat grid
    */
   public static clickAvailableCoachTab(): boolean {
@@ -947,10 +988,11 @@ export class RailwayAdapter {
   /**
    * All real coach entries of the "Select Coach" dropdown, e.g.
    *   "GA - 17 Seat(s)" → { coachName: 'GA', available: 17 }
-   * Placeholder ("Select Coach") and empty (0 seat) entries are skipped.
+   * Placeholder ("Select Coach") and empty (0 seat) entries are skipped unless `includeEmpty`
+   * is true (needed to reach a coach whose last free seat we are holding ourselves).
    * coachName is derived exactly like SeatMapParser does, so the two always agree.
    */
-  public static getCoachOptions(): CoachOption[] {
+  public static getCoachOptions(includeEmpty: boolean = false): CoachOption[] {
     const sel = this.findCoachSelect();
     if (!sel) return [];
 
@@ -962,7 +1004,7 @@ export class RailwayAdapter {
       if (text.includes('SELECT') || text.includes('CHOOSE') || text.includes('OPTION')) return;
 
       const available = this.parseAvailableCount(text);
-      if (available <= 0) return;
+      if (available <= 0 && !includeEmpty) return;
 
       const coachName = text.split('(')[0].split('-')[0].replace(/SEAT.*/i, '').trim();
       result.push({ index, value: option.value, label, coachName, available });

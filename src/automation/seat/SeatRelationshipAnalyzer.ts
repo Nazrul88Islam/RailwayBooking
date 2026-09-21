@@ -1,15 +1,20 @@
 import { SeatInfo, CoachSeatMap } from './SeatTypes';
 
+const seatNumber = (name: string): number => {
+  const m = name.match(/\d+/);
+  return m ? parseInt(m[0], 10) : NaN;
+};
+
 export class SeatRelationshipAnalyzer {
   /**
-   * Find contiguous adjacent seats in the same physical row within a coach.
+   * Find seats sitting SIDE BY SIDE in the same physical row within a coach.
    * (col difference must be exactly 1, so seats on opposite sides of an aisle never qualify.)
+   * Groups whose seat numbers are consecutive (e.g. 12 + 13) are listed first.
    */
-  public static findAdjacentSeats(coach: CoachSeatMap, count: number, includeSelected: boolean = false): SeatInfo[][] {
-    const availableSeats = coach.seats.filter(s => s.isAvailable || (includeSelected && s.isSelected));
+  public static findAdjacentSeats(coach: CoachSeatMap, count: number): SeatInfo[][] {
+    const availableSeats = coach.seats.filter(s => s.isAvailable);
     const validGroups: SeatInfo[][] = [];
 
-    // Group available seats by row
     const rowMap = new Map<number, SeatInfo[]>();
     availableSeats.forEach(s => {
       if (!rowMap.has(s.row)) rowMap.set(s.row, []);
@@ -17,16 +22,13 @@ export class SeatRelationshipAnalyzer {
     });
 
     rowMap.forEach((rowSeats) => {
-      // Sort row seats by column
       rowSeats.sort((a, b) => a.col - b.col);
 
-      // Slide a window of size `count` over column contiguous seats
       for (let i = 0; i <= rowSeats.length - count; i++) {
         let isContiguous = true;
         const candidateGroup = [rowSeats[i]];
 
         for (let j = 1; j < count; j++) {
-          // Check if column difference is exactly 1 (adjacent)
           if (rowSeats[i + j].col === candidateGroup[j - 1].col + 1) {
             candidateGroup.push(rowSeats[i + j]);
           } else {
@@ -35,34 +37,46 @@ export class SeatRelationshipAnalyzer {
           }
         }
 
-        if (isContiguous) {
-          validGroups.push(candidateGroup);
-        }
+        if (isContiguous) validGroups.push(candidateGroup);
       }
     });
 
-    const getSeatNum = (name: string): number => {
-      const m = name.match(/\d+/);
-      return m ? parseInt(m[0], 10) : NaN;
+    const isConsecutive = (g: SeatInfo[]) => {
+      const first = seatNumber(g[0].name);
+      const last = seatNumber(g[g.length - 1].name);
+      return !isNaN(first) && !isNaN(last) && last === first + (g.length - 1);
     };
 
-    // Rank groups so true consecutive numeric pairs (e.g. CHA-4 + CHA-5 for husband/wife) are prioritized first
     validGroups.sort((gA, gB) => {
-      const numA1 = getSeatNum(gA[0].name);
-      const numA2 = getSeatNum(gA[gA.length - 1].name);
-      const isConsecutiveA = !isNaN(numA1) && !isNaN(numA2) && numA2 === numA1 + (gA.length - 1);
-
-      const numB1 = getSeatNum(gB[0].name);
-      const numB2 = getSeatNum(gB[gB.length - 1].name);
-      const isConsecutiveB = !isNaN(numB1) && !isNaN(numB2) && numB2 === numB1 + (gB.length - 1);
-
-      if (isConsecutiveA && !isConsecutiveB) return -1;
-      if (!isConsecutiveA && isConsecutiveB) return 1;
-
+      const a = isConsecutive(gA);
+      const b = isConsecutive(gB);
+      if (a && !b) return -1;
+      if (!a && b) return 1;
       return gA[0].row - gB[0].row || gA[0].col - gB[0].col;
     });
 
     return validGroups;
+  }
+
+  /**
+   * Seats with consecutive NUMBERS (e.g. THA-15 + THA-16) even when they are not physically side
+   * by side (15 is the end of one row, 16 the start of the next). Used only as a fallback.
+   */
+  public static findConsecutiveNumberSeats(coach: CoachSeatMap, count: number): SeatInfo[][] {
+    const numbered = coach.seats
+      .filter(s => s.isAvailable && !isNaN(seatNumber(s.name)))
+      .map(s => ({ s, n: seatNumber(s.name) }))
+      .sort((a, b) => a.n - b.n);
+
+    const groups: SeatInfo[][] = [];
+    for (let i = 0; i + count <= numbered.length; i++) {
+      let ok = true;
+      for (let j = 1; j < count; j++) {
+        if (numbered[i + j].n !== numbered[i + j - 1].n + 1) { ok = false; break; }
+      }
+      if (ok) groups.push(numbered.slice(i, i + count).map(x => x.s));
+    }
+    return groups;
   }
 
   /**
@@ -90,9 +104,7 @@ export class SeatRelationshipAnalyzer {
         for (let i = 0; i < colSeats.length - 1; i++) {
           const s1 = colSeats[i];
           const s2 = colSeats[i + 1];
-          if (s2.row === s1.row + 1) {
-            validGroups.push([s1, s2]);
-          }
+          if (s2.row === s1.row + 1) validGroups.push([s1, s2]);
         }
       });
     } else if (count === 4) {
@@ -100,9 +112,7 @@ export class SeatRelationshipAnalyzer {
         const right = at.get(`${s.row}:${s.col + 1}`);
         const below = at.get(`${s.row + 1}:${s.col}`);
         const belowRight = at.get(`${s.row + 1}:${s.col + 1}`);
-        if (right && below && belowRight) {
-          validGroups.push([s, right, below, belowRight]);
-        }
+        if (right && below && belowRight) validGroups.push([s, right, below, belowRight]);
       });
     }
 

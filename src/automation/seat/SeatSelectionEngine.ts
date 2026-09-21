@@ -4,7 +4,8 @@ import { SeatMode } from '../../shared/types';
 
 export class SeatSelectionEngine {
   /**
-   * Select best matching seats based on mode and fallback preferences
+   * Select best matching seats based on mode and fallback preferences.
+   * A successful result ALWAYS contains exactly `targetCount` seats from ONE coach.
    */
   public static selectSeats(
     coaches: CoachSeatMap[],
@@ -13,24 +14,14 @@ export class SeatSelectionEngine {
     allowFallback: boolean
   ): SeatSelectionResult {
     if (!coaches || coaches.length === 0) {
-      return {
-        success: false,
-        seats: [],
-        modeUsed: mode,
-        reason: 'No coaches or seat maps available'
-      };
+      return { success: false, seats: [], modeUsed: mode, reason: 'No coaches or seat maps available' };
     }
 
     // Step 1: Attempt requested mode
     for (const coach of coaches) {
       const match = this.attemptModeInCoach(coach, targetCount, mode);
-      const selectedCount = coach.seats.filter(s => s.isSelected).length;
-      if (match && (match.length === targetCount || (selectedCount > 0 && match.length + selectedCount === targetCount))) {
-        return {
-          success: true,
-          seats: match,
-          modeUsed: mode
-        };
+      if (match && match.length === targetCount) {
+        return { success: true, seats: match, modeUsed: mode };
       }
     }
 
@@ -44,52 +35,46 @@ export class SeatSelectionEngine {
       };
     }
 
-    // Step 2: Fallback Cascade
-    // Fallback 1: Adjacent seats in same coach
+    // Step 2: Fallback cascade (best arrangement first)
+    // Fallback 1: seats side by side
     if (mode !== 'adjacent') {
       for (const coach of coaches) {
         const adjacent = SeatRelationshipAnalyzer.findAdjacentSeats(coach, targetCount);
         if (adjacent.length > 0) {
-          return {
-            success: true,
-            seats: adjacent[0],
-            modeUsed: 'adjacent',
-            reason: 'Fallback to adjacent seats in same coach'
-          };
+          return { success: true, seats: adjacent[0], modeUsed: 'adjacent', reason: 'Fallback to adjacent seats in same coach' };
         }
       }
     }
 
-    // Fallback 2: Face-to-face (2 or 4 seats)
+    // Fallback 2: consecutive seat numbers (e.g. THA-15 + THA-16)
+    if (targetCount > 1) {
+      for (const coach of coaches) {
+        const groups = SeatRelationshipAnalyzer.findConsecutiveNumberSeats(coach, targetCount);
+        if (groups.length > 0) {
+          return { success: true, seats: groups[0], modeUsed: 'adjacent', reason: 'Fallback to consecutive seat numbers' };
+        }
+      }
+    }
+
+    // Fallback 3: Face-to-face (2 or 4 seats)
     if ((targetCount === 2 || targetCount === 4) && mode !== 'face_to_face') {
       for (const coach of coaches) {
         const groups = SeatRelationshipAnalyzer.findFaceToFacePairs(coach, targetCount);
         if (groups.length > 0) {
-          return {
-            success: true,
-            seats: groups[0],
-            modeUsed: 'face_to_face',
-            reason: 'Fallback to face-to-face seating'
-          };
+          return { success: true, seats: groups[0], modeUsed: 'face_to_face', reason: 'Fallback to face-to-face seating' };
         }
       }
     }
 
-    // Fallback 3: Same physical row
+    // Fallback 4: Same physical row (may straddle the aisle)
     for (const coach of coaches) {
       const sameRow = SeatRelationshipAnalyzer.findSameRowSeats(coach, targetCount);
       if (sameRow.length > 0) {
-        return {
-          success: true,
-          seats: sameRow[0],
-          modeUsed: 'adjacent',
-          reason: 'Fallback to same physical row'
-        };
+        return { success: true, seats: sameRow[0], modeUsed: 'adjacent', reason: 'Fallback to same physical row' };
       }
     }
 
-    // Fallback 4: Best available seats — from ONE coach (seats in different coaches cannot be
-    // clicked together, the page only shows one coach at a time)
+    // Fallback 5: Best available seats — from ONE coach (seats in different coaches must never be mixed)
     for (const coach of coaches) {
       const available = coach.seats.filter(s => s.isAvailable);
       if (available.length >= targetCount) {
@@ -113,12 +98,14 @@ export class SeatSelectionEngine {
 
   /** Lower = better. Used to compare coaches when no coach satisfies the requested mode exactly. */
   public static rankResult(result: SeatSelectionResult): number {
+    const reason = result.reason || '';
     if (result.modeUsed === 'adjacent') {
-      // "same physical row" fallback may straddle the aisle → worse than truly adjacent seats
-      return (result.reason || '').includes('same physical row') ? 2 : 0;
+      if (reason.includes('same physical row')) return 3;   // may straddle the aisle
+      if (reason.includes('consecutive')) return 1;         // e.g. 15 + 16
+      return 0;                                             // truly side by side
     }
-    if (result.modeUsed === 'face_to_face') return 1;
-    return 3;
+    if (result.modeUsed === 'face_to_face') return 2;
+    return 4;
   }
 
   private static attemptModeInCoach(
@@ -127,18 +114,6 @@ export class SeatSelectionEngine {
     mode: SeatMode
   ): SeatInfo[] | null {
     const available = coach.seats.filter(s => s.isAvailable);
-    const selectedInCoach = coach.seats.filter(s => s.isSelected);
-
-    // If user already has pre-selected seat(s) in this coach, attempt to complete the pair/group
-    if (selectedInCoach.length > 0 && mode === 'adjacent') {
-      const groupsWithSelected = SeatRelationshipAnalyzer.findAdjacentSeats(coach, count, true);
-      const matchingGroup = groupsWithSelected.find(g => g.some(s => s.isSelected));
-      if (matchingGroup) {
-        // Return only the unselected/available seats in that adjacent group to click
-        const missing = matchingGroup.filter(s => !s.isSelected);
-        if (missing.length > 0) return missing;
-      }
-    }
 
     if (count === 1) {
       return available.length > 0 ? [available[0]] : null;
