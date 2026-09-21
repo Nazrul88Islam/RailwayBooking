@@ -3,11 +3,11 @@ import react from '@vitejs/plugin-react';
 import { resolve } from 'path';
 import { copyFileSync, mkdirSync, existsSync } from 'fs';
 
-function buildContentScriptPlugin() {
+function buildStandaloneScriptsPlugin() {
   return {
-    name: 'build-content-script-plugin',
+    name: 'build-standalone-scripts-plugin',
     async closeBundle() {
-      // Build content script as standalone IIFE file without module import dependencies
+      // 1. Build content script as standalone IIFE file
       await build({
         configFile: false,
         build: {
@@ -23,6 +23,22 @@ function buildContentScriptPlugin() {
       });
       console.log('✔ content.js bundled as standalone IIFE script');
 
+      // 2. Build service worker as standalone IIFE file
+      await build({
+        configFile: false,
+        build: {
+          outDir: 'dist/background',
+          emptyOutDir: false,
+          lib: {
+            entry: resolve(__dirname, 'src/background/serviceWorker.ts'),
+            name: 'RailwayServiceWorker',
+            formats: ['iife'],
+            fileName: () => 'serviceWorker.js'
+          }
+        }
+      });
+      console.log('✔ serviceWorker.js bundled as standalone IIFE script');
+
       if (!existsSync('dist')) {
         mkdirSync('dist', { recursive: true });
       }
@@ -33,22 +49,16 @@ function buildContentScriptPlugin() {
 }
 
 export default defineConfig({
-  plugins: [react(), buildContentScriptPlugin()],
+  plugins: [react(), buildStandaloneScriptsPlugin()],
   build: {
     outDir: 'dist',
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        popup: resolve(__dirname, 'index.html'),
-        serviceWorker: resolve(__dirname, 'src/background/serviceWorker.ts')
+        popup: resolve(__dirname, 'index.html')
       },
       output: {
-        entryFileNames: (chunkInfo) => {
-          if (chunkInfo.name === 'serviceWorker') {
-            return 'background/serviceWorker.js';
-          }
-          return 'assets/[name]-[hash].js';
-        },
+        entryFileNames: 'assets/[name]-[hash].js',
         chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: 'assets/[name]-[hash].[ext]'
       }
@@ -59,3 +69,4 @@ export default defineConfig({
     environment: 'node'
   }
 });
+

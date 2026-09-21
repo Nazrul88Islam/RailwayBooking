@@ -6,8 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "zip": "npm run build && powershell -Command \"Compress-Archive -Path 'dist\\*' -DestinationPath 'RailwayBookingExtension_v2.0.0.zip' -Force\"",
     "preview": "vite preview",
     "test": "vitest run"
+
   },
   "dependencies": {
     "lucide-react": "^0.344.0",

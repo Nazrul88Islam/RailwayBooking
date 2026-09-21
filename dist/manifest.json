@@ -17,8 +17,7 @@
     "default_title": "Railway Ticket Booking Tools"
   },
   "background": {
-    "service_worker": "background/serviceWorker.js",
-    "type": "module"
+    "service_worker": "background/serviceWorker.js"
   },
   "content_scripts": [
     {
