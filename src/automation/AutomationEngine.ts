@@ -1,4 +1,4 @@
-import { BookingSettings, AutomationState, LogItem } from '../shared/types';
+import { BookingSettings, AutomationState, LogItem, SeatDetailRow } from '../shared/types';
 import { RailwayAdapter, CoachOption } from '../content/railway/RailwayAdapter';
 import { SeatMapParser } from './seat/SeatMapParser';
 import { SeatSelectionEngine } from './seat/SeatSelectionEngine';
@@ -17,18 +17,19 @@ interface SeatPlan {
 export class AutomationEngine {
   private abortController: AbortController | null = null;
   private settings: BookingSettings;
-  private onStateChange: (state: AutomationState, statusText?: string) => void;
+  private onStateChange: (state: AutomationState, statusText?: string, seatDetails?: SeatDetailRow[]) => void;
   private onLog: (msg: string, type: 'info' | 'success' | 'warning' | 'error') => void;
 
   constructor(
     settings: BookingSettings,
-    onStateChange: (state: AutomationState, statusText?: string) => void,
+    onStateChange: (state: AutomationState, statusText?: string, seatDetails?: SeatDetailRow[]) => void,
     onLog: (msg: string, type: 'info' | 'success' | 'warning' | 'error') => void
   ) {
     this.settings = settings;
     this.onStateChange = onStateChange;
     this.onLog = onLog;
   }
+
 
   /**
    * Number of seats to book. Popup/storage values often arrive as strings ("2"), and the old
@@ -930,6 +931,14 @@ export class AutomationEngine {
       return;
     }
 
+    const seatDetails = SeatMapParser.readFullSeatDetailsCart(document, selectedSeats, this.settings.seatClass);
+
+    this.onStateChange(
+      AutomationState.SELECTING_SEATS,
+      `Selected ${selectedCount} ${this.settings.seatClass} seat(s): ${selectedSeats.map(s => s.name).join(', ')}`,
+      seatDetails
+    );
+
     // Wait (up to 5s) for the Continue button to exist AND be enabled.
     let continueBtn: HTMLElement | null = null;
     for (let i = 0; i < 20; i++) {
@@ -941,12 +950,19 @@ export class AutomationEngine {
 
     if (!continueBtn) {
       this.onLog('Continue/Purchase button not found (or still disabled).', 'error');
-      this.onStateChange(AutomationState.ERROR, 'Continue button not found.');
+      this.onStateChange(AutomationState.ERROR, 'Continue button not found.', seatDetails);
       return;
     }
 
     continueBtn.click();
     this.onLog(`Continue clicked with ${selectedCount} ${this.settings.seatClass} seat(s).`, 'success');
+
+    this.onStateChange(
+      AutomationState.CONTINUE,
+      `Continue clicked with ${selectedCount} ${this.settings.seatClass} seat(s).`,
+      seatDetails
+    );
+
 
     // Give the next screen up to ~4s to show a halt condition BEFORE declaring completion.
     for (let i = 0; i < 8; i++) {

@@ -1,4 +1,4 @@
-import { BookingSettings, AutomationState, LogItem } from './types';
+import { BookingSettings, AutomationState, LogItem, SeatDetailRow } from './types';
 
 export enum MessageType {
   START_AUTOMATION = 'START_AUTOMATION',
@@ -25,4 +25,6 @@ export interface StateUpdatedPayload {
   state: AutomationState;
   statusText?: string;
   logs?: LogItem[];
+  seatDetails?: SeatDetailRow[];
 }
+

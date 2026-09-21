@@ -1,10 +1,11 @@
 import { MessageType, ExtensionMessage } from '../shared/messages';
-import { AutomationState, LogItem, BookingSettings } from '../shared/types';
+import { AutomationState, LogItem, BookingSettings, SeatDetailRow } from '../shared/types';
 import { DEFAULT_SETTINGS } from '../shared/constants';
 
 let currentSettings: BookingSettings = DEFAULT_SETTINGS;
 let currentState: AutomationState = AutomationState.IDLE;
 let currentStatusText: string = 'Ready';
+let currentSeatDetails: SeatDetailRow[] | undefined = undefined;
 let currentLogs: LogItem[] = [
   {
     id: 'sw-init',
@@ -22,7 +23,8 @@ function broadcastStateUpdate() {
       state: currentState,
       statusText: currentStatusText,
       logs: currentLogs,
-      settings: currentSettings
+      settings: currentSettings,
+      seatDetails: currentSeatDetails
     }
   };
 
@@ -54,7 +56,8 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
       state: currentState,
       statusText: currentStatusText,
       logs: currentLogs,
-      settings: currentSettings
+      settings: currentSettings,
+      seatDetails: currentSeatDetails
     });
     return true;
   }
@@ -64,6 +67,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
     currentSettings = settings;
     currentState = AutomationState.STARTING;
     currentStatusText = `Starting automation for ${settings.fromStation} → ${settings.toStation}`;
+    currentSeatDetails = undefined;
     addLog(`Command: Start Autobot (${settings.fromStation} → ${settings.toStation})`, 'info');
     broadcastStateUpdate();
 
@@ -117,6 +121,8 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
   if (message.type === MessageType.STATE_UPDATED && message.payload) {
     if (message.payload.state) currentState = message.payload.state;
     if (message.payload.statusText) currentStatusText = message.payload.statusText;
+    if (message.payload.seatDetails) currentSeatDetails = message.payload.seatDetails;
     broadcastStateUpdate();
   }
 });
+

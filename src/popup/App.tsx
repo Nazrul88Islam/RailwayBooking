@@ -7,9 +7,10 @@ import { Clock } from './components/Clock';
 import { JourneySettings } from './components/JourneySettings';
 import { AutomationButton } from './components/AutomationButton';
 import { StatusIndicator } from './components/StatusIndicator';
+import { SeatDetailsCard } from './components/SeatDetailsCard';
 import { ActivityLog } from './components/ActivityLog';
 
-import { BookingSettings, AutomationState, LogItem } from '../shared/types';
+import { BookingSettings, AutomationState, LogItem, SeatDetailRow } from '../shared/types';
 import { DEFAULT_SETTINGS } from '../shared/constants';
 import { getStoredSettings, saveStoredSettings } from '../shared/storage';
 import { MessageType, ExtensionMessage } from '../shared/messages';
@@ -18,6 +19,7 @@ export const App: React.FC = () => {
   const [settings, setSettings] = useState<BookingSettings>(DEFAULT_SETTINGS);
   const [state, setState] = useState<AutomationState>(AutomationState.IDLE);
   const [statusText, setStatusText] = useState<string>('');
+  const [seatDetails, setSeatDetails] = useState<SeatDetailRow[] | undefined>(undefined);
   const [logs, setLogs] = useState<LogItem[]>([
     {
       id: 'init-1',
@@ -41,6 +43,7 @@ export const App: React.FC = () => {
           setState(response.state);
           if (response.statusText) setStatusText(response.statusText);
           if (response.logs) setLogs(response.logs);
+          if (response.seatDetails) setSeatDetails(response.seatDetails);
         }
       });
 
@@ -49,6 +52,7 @@ export const App: React.FC = () => {
           if (message.payload?.state) setState(message.payload.state);
           if (message.payload?.statusText) setStatusText(message.payload.statusText);
           if (message.payload?.logs) setLogs(message.payload.logs);
+          if (message.payload?.seatDetails) setSeatDetails(message.payload.seatDetails);
         } else if (message.type === MessageType.LOG_ADDED && message.payload) {
           setLogs((prev) => [...prev, message.payload]);
         }
@@ -100,6 +104,7 @@ export const App: React.FC = () => {
 
     addLog(`Starting automation for ${settings.fromStation} → ${settings.toStation}`, 'info');
     setState(AutomationState.STARTING);
+    setSeatDetails(undefined);
 
     if (typeof chrome !== 'undefined' && chrome.runtime) {
       chrome.runtime.sendMessage({
@@ -148,7 +153,10 @@ export const App: React.FC = () => {
         customStatus={statusText}
       />
 
+      <SeatDetailsCard seatDetails={seatDetails} />
+
       <ActivityLog logs={logs} />
     </div>
   );
 };
+

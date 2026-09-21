@@ -1,4 +1,5 @@
 import { SeatInfo, CoachSeatMap } from './SeatTypes';
+import { SeatDetailRow } from '../../shared/types';
 
 /**
  * Seat status detection.
@@ -29,6 +30,7 @@ const SEAT_CODE_FULL_RE = /^([A-Z\u0980-\u09FF]{1,5}[-_\s]?)?\d{1,3}[A-Z]?(?:\(B
 const SEAT_CODE_EMBEDDED_RE = /([A-Z\u0980-\u09FF]{1,5}\s?-\s?\d{1,3}[A-Z]?)/i;
 /** "KHA-1", "CHA-25": coach prefix + hyphen + number — what the real seat labels look like. */
 const STRICT_CODE_RE = /^[A-Z\u0980-\u09FF]{1,5}-\d{1,3}$/i;
+
 
 interface Rect {
   left: number;
@@ -189,6 +191,61 @@ export class SeatMapParser {
     }
     return codes;
   }
+
+  /**
+   * Parse structured Seat Details rows (Class, Seats, Fare) from the DOM cart table or fallback seats.
+   */
+  public static readFullSeatDetailsCart(
+    container: HTMLElement | Document = document,
+    fallbackSeats: SeatInfo[] = [],
+    fallbackClass: string = ''
+  ): SeatDetailRow[] {
+    const coachSelect = this.findCoachSelectElement(container);
+    const panel = this.findSeatDetailsPanel(container, coachSelect);
+
+    if (panel) {
+      const table = panel.querySelector('table');
+      if (table) {
+        const rows = Array.from(table.querySelectorAll('tr'));
+        const items: SeatDetailRow[] = [];
+
+        rows.forEach(tr => {
+          const cells = Array.from(tr.querySelectorAll('td, th')).map(c => (c.textContent || '').trim());
+          if (cells.length >= 2) {
+            const isHeader = cells.some(c => /class|seat|fare|price/i.test(c));
+            if (!isHeader) {
+              const className = cells[0] || fallbackClass || 'CLASS';
+              const seatName = cells[1] || '';
+              const fare = cells[2] || (cells.length > 2 ? cells[2] : '');
+              if (seatName && !/class|seat|fare/i.test(seatName)) {
+                items.push({
+                  className,
+                  seats: seatName,
+                  fare: fare ? (fare.includes('৳') || fare.includes('BDT') ? fare : `৳ ${fare}`) : '৳ --'
+                });
+              }
+            }
+          }
+        });
+
+        if (items.length > 0) return items;
+      }
+    }
+
+    if (fallbackSeats.length > 0) {
+      const seatNames = fallbackSeats.map(s => s.name).join(', ');
+      return [
+        {
+          className: fallbackClass || 'CLASS',
+          seats: seatNames,
+          fare: '৳ --'
+        }
+      ];
+    }
+
+    return [];
+  }
+
 
   /**
    * The right-hand "Seat Details" panel: the biggest ancestor of its heading that does NOT also

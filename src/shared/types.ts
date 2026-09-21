@@ -63,6 +63,12 @@ export interface LogItem {
   type: LogType;
 }
 
+export interface SeatDetailRow {
+  className: string;
+  seats: string;
+  fare: string;
+}
+
 export interface SeatInfo {
   id: string;
   name: string;
@@ -75,3 +81,4 @@ export interface SeatInfo {
   yPos?: number;
   elementRef?: HTMLElement;
 }
+
