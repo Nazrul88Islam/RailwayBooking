@@ -39,6 +39,10 @@ export const App: React.FC = () => {
     // Check background state if chrome runtime is available
     if (typeof chrome !== 'undefined' && chrome.runtime) {
       chrome.runtime.sendMessage({ type: MessageType.GET_STATE }, (response) => {
+        if (chrome.runtime.lastError) {
+          // Service worker waking up or disconnected, suppress error
+          return;
+        }
         if (response && response.state) {
           setState(response.state);
           if (response.statusText) setStatusText(response.statusText);
@@ -46,6 +50,7 @@ export const App: React.FC = () => {
           if (response.seatDetails) setSeatDetails(response.seatDetails);
         }
       });
+
 
       const messageListener = (message: ExtensionMessage) => {
         if (message.type === MessageType.STATE_UPDATED) {

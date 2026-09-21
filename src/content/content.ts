@@ -79,7 +79,11 @@ const startAutomationEngine = (settings: BookingSettings) => {
       chrome.runtime.sendMessage({
         type: MessageType.STATE_UPDATED,
         payload: { state, statusText, seatDetails }
-      }).catch(() => {});
+      }, () => {
+        if (chrome.runtime.lastError) {
+          // Popup closed, suppress unhandled lastError warning
+        }
+      });
     },
     (msg: string, type: 'info' | 'success' | 'warning' | 'error') => {
       console.log(`[Autobot] ${type.toUpperCase()}: ${msg}`);
@@ -91,7 +95,11 @@ const startAutomationEngine = (settings: BookingSettings) => {
           message: msg,
           type
         }
-      }).catch(() => {});
+      }, () => {
+        if (chrome.runtime.lastError) {
+          // Popup closed, suppress unhandled lastError warning
+        }
+      });
     }
   );
 
@@ -100,6 +108,11 @@ const startAutomationEngine = (settings: BookingSettings) => {
 
 // Check if background worker has an active running automation state on new page load
 chrome.runtime.sendMessage({ type: MessageType.GET_STATE }, (response) => {
+  if (chrome.runtime.lastError) {
+    // Service worker waking up or disconnected, suppress error
+    return;
+  }
+
   console.log(
     '🚆 [Railway] GET_STATE after page load:',
     {
@@ -139,6 +152,7 @@ chrome.runtime.sendMessage({ type: MessageType.GET_STATE }, (response) => {
     }
   }
 });
+
 
 chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendResponse) => {
   if (message.type === MessageType.START_AUTOMATION) {

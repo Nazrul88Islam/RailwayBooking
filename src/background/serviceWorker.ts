@@ -28,8 +28,10 @@ function broadcastStateUpdate() {
     }
   };
 
-  chrome.runtime.sendMessage(updateMessage).catch(() => {
-    // Popup might not be open, ignore unhandled promise rejection
+  chrome.runtime.sendMessage(updateMessage, () => {
+    if (chrome.runtime.lastError) {
+      // Popup might be closed, suppress unhandled lastError warning
+    }
   });
 }
 
@@ -46,7 +48,11 @@ function addLog(message: string, type: 'info' | 'success' | 'warning' | 'error')
   chrome.runtime.sendMessage({
     type: MessageType.LOG_ADDED,
     payload: item
-  }).catch(() => {});
+  }, () => {
+    if (chrome.runtime.lastError) {
+      // Popup closed, suppress unhandled lastError warning
+    }
+  });
 }
 
 // Handle incoming message requests
@@ -78,21 +84,26 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
         chrome.tabs.sendMessage(activeTab.id, {
           type: MessageType.START_AUTOMATION,
           payload: { settings }
-        }).catch(async () => {
-          // Tab was opened before extension startup: dynamically inject content script!
-          try {
-            await chrome.scripting.executeScript({
+        }, () => {
+          if (chrome.runtime.lastError) {
+            // Tab was opened before extension startup: dynamically inject content script!
+            chrome.scripting.executeScript({
               target: { tabId: activeTab.id! },
               files: ['content/content.js']
+            }).then(() => {
+              setTimeout(() => {
+                chrome.tabs.sendMessage(activeTab.id!, {
+                  type: MessageType.START_AUTOMATION,
+                  payload: { settings }
+                }, () => {
+                  if (chrome.runtime.lastError) {
+                    // Suppress connection warning
+                  }
+                });
+              }, 100);
+            }).catch(() => {
+              addLog(`Content script connection note: Ensure you are on eticket.railway.gov.bd and refresh the page (F5).`, 'warning');
             });
-            setTimeout(() => {
-              chrome.tabs.sendMessage(activeTab.id!, {
-                type: MessageType.START_AUTOMATION,
-                payload: { settings }
-              }).catch(() => {});
-            }, 100);
-          } catch (err) {
-            addLog(`Content script connection note: Ensure you are on eticket.railway.gov.bd and refresh the page (F5).`, 'warning');
           }
         });
       }
@@ -110,7 +121,11 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
 
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (tabs[0]?.id) {
-        chrome.tabs.sendMessage(tabs[0].id, { type: MessageType.STOP_AUTOMATION }).catch(() => {});
+        chrome.tabs.sendMessage(tabs[0].id, { type: MessageType.STOP_AUTOMATION }, () => {
+          if (chrome.runtime.lastError) {
+            // Suppress error
+          }
+        });
       }
     });
 
@@ -125,4 +140,5 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
     broadcastStateUpdate();
   }
 });
+
 
