@@ -334,6 +334,88 @@ export class RailwayAdapter {
   }
 
   /**
+   * Open the date-picker calendar by clicking the date input field.
+   * Safe to call multiple times — if the calendar is already open this is a no-op.
+   */
+  public static openDatePicker(): boolean {
+    const inputEl = (this.findElement(RAILWAY_SELECTORS.datePickerInput) ||
+      this.findElementByText('input', 'date')) as HTMLInputElement | null;
+    if (!inputEl) return false;
+    inputEl.focus();
+    inputEl.click();
+    return true;
+  }
+
+  /**
+   * Check whether the target journey date is currently visible AND selectable in the
+   * open calendar overlay.  Returns:
+   *   'available'    — the day cell is present and not disabled / greyed-out
+   *   'disabled'     — the day cell exists but is explicitly marked disabled/outside-month
+   *   'not_visible'  — the calendar is not open or the day cell is not in the DOM at all
+   *
+   * The function does NOT click anything — call openDatePicker() first if needed.
+   */
+  public static isJourneyDateAvailable(
+    dateStr: string
+  ): 'available' | 'disabled' | 'not_visible' {
+    const parts = dateStr.split('-');
+    if (parts.length < 3) return 'not_visible';
+
+    const [, , dayStr] = parts;
+    const dayNum = parseInt(dayStr, 10);
+    const dayPad3 = dayStr.padStart(3, '0');
+
+    // All candidate day cells from any known calendar library
+    const calendarDays = Array.from(document.querySelectorAll(
+      '.react-datepicker__day, .datepicker-day, .day-cell, [class*="day"]'
+    )) as HTMLElement[];
+
+    if (!calendarDays.length) return 'not_visible';
+
+    // Match only cells whose text / class corresponds to dayNum, ignoring header rows,
+    // day-name labels ("Mon", "01" used for column header), and outer-month fillers.
+    const matches = calendarDays.filter(el => {
+      const cls = (el.className || '').toLowerCase();
+      const txt = (el.textContent || '').trim();
+
+      // Must look like a day number cell
+      const matchesByClass = cls.includes(`--${dayPad3}`) || cls.includes(`--${dayStr}`);
+      const matchesByText  = txt === String(dayNum) || txt === dayStr.padStart(2, '0');
+      if (!matchesByClass && !matchesByText) return false;
+
+      // Exclude calendar header / day-name labels (very short, letters only)
+      if (/^[A-Za-z]{2,3}$/.test(txt)) return false;
+
+      return true;
+    });
+
+    if (!matches.length) return 'not_visible';
+
+    // A day is disabled when it carries a disabled/outside class OR aria-disabled
+    const isDisabled = (el: HTMLElement): boolean => {
+      const cls = (el.className || '').toLowerCase();
+      if (
+        cls.includes('disabled') ||
+        cls.includes('outside')  ||
+        cls.includes('outside-month') ||
+        cls.includes('past')     ||
+        cls.includes('grayed')   ||
+        cls.includes('greyed')
+      ) return true;
+      if (el.getAttribute('aria-disabled') === 'true') return true;
+      if ((el as HTMLButtonElement).disabled) return true;
+      return false;
+    };
+
+    // If ANY match is NOT disabled → the date is available
+    const hasEnabled = matches.some(el => !isDisabled(el));
+    if (hasEnabled) return 'available';
+
+    // All matches are disabled
+    return 'disabled';
+  }
+
+  /**
    * Set HTMLSelectElement value triggering React native setter & events
    */
   public static setSelectValue(selectEl: HTMLSelectElement, value: string): void {

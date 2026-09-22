@@ -170,7 +170,13 @@ export class AutomationEngine {
         return;
       }
 
-      // ── STEP 2: Homepage form fill & search ───────────────────────────────
+      // ── STEP 2a: Wait until the target date is open on the site ─────────────
+      if (this.isHomePage()) {
+        const dateReady = await this.waitUntilDateAvailable(signal);
+        if (!dateReady) return; // timed out or aborted
+      }
+
+      // ── STEP 2b: Homepage form fill & search ───────────────────────────────
       if (this.isHomePage()) {
         const proceeded = await this.fillFormAndSearch(signal);
         if (!proceeded) return; // hard navigation triggered — page will reload
@@ -218,7 +224,109 @@ export class AutomationEngine {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // STEP 2 — homepage form
+  // STEP 2a — wait until the booking date is open on the site
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Before the site opens booking for a date (e.g. Oct 1 tickets open at 8:00 AM),
+   * the day cell is either absent from the calendar or marked disabled.  This method
+   * polls the date-picker every 5 seconds for up to 20 minutes from the moment Start
+   * was pressed.  As soon as the target date becomes selectable it returns `true` so
+   * the normal form-fill + search flow can begin.
+   *
+   * If the calendar cannot be opened at all (no date input found on the page) we skip
+   * this check and let `fillFormAndSearch` handle it — the site may already show the
+   * right results or an input-less flow may be used.
+   */
+  private async waitUntilDateAvailable(signal: AbortSignal): Promise<boolean> {
+    this.checkAborted(signal);
+
+    const date = this.settings.journeyDate;
+    if (!date) return true; // no date configured → skip wait
+
+    // Maximum wait = 20 minutes from now
+    const MAX_WAIT_MS    = 20 * 60 * 1000;
+    const POLL_INTERVAL  = 5_000; // 5 seconds between each calendar peek
+    const startedAt      = Date.now();
+    const deadline       = startedAt + MAX_WAIT_MS;
+
+    // ── First, open the calendar and do an immediate check ────────────────
+    const pickerOpened = RailwayAdapter.openDatePicker();
+    if (!pickerOpened) {
+      // Date input not found on this page — skip the wait entirely
+      this.onLog(
+        `Date-picker not found on the page — skipping date-availability check (will attempt to set date during form fill).`,
+        'info'
+      );
+      return true;
+    }
+
+    // Give the calendar a moment to render
+    await this.delay(400, signal);
+
+    let attempt = 0;
+    while (Date.now() < deadline) {
+      this.checkAborted(signal);
+      attempt++;
+
+      const status = RailwayAdapter.isJourneyDateAvailable(date);
+      const elapsedSec  = Math.round((Date.now() - startedAt) / 1000);
+      const remainingSec = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+      const remainingMin = Math.floor(remainingSec / 60);
+      const remainingSs  = remainingSec % 60;
+
+      if (status === 'available') {
+        this.onLog(
+          `✅ Journey date ${date} is now available in the calendar (check #${attempt}, elapsed ${elapsedSec}s). Proceeding with booking.`,
+          'success'
+        );
+        this.onStateChange(AutomationState.SELECTING_DATE, `Date ${date} is open — starting booking...`);
+        // Close the calendar so the subsequent form-fill can open it cleanly
+        document.body.click();
+        await this.delay(200, signal);
+        return true;
+      }
+
+      if (status === 'disabled') {
+        this.onLog(
+          `⏳ Date ${date} is visible but still disabled (check #${attempt}). Waiting... [${remainingMin}m ${remainingSs}s remaining]`,
+          'warning'
+        );
+      } else {
+        // 'not_visible': calendar might have closed; re-open it
+        this.onLog(
+          `⏳ Date ${date} not yet in calendar (check #${attempt}) — booking window not open yet. [${remainingMin}m ${remainingSs}s remaining]`,
+          'info'
+        );
+        RailwayAdapter.openDatePicker();
+      }
+
+      this.onStateChange(
+        AutomationState.WAITING_FOR_BOOKING_TIME,
+        `Waiting for ${date} to open on the site... [${remainingMin}m ${remainingSs}s left]`
+      );
+
+      // Wait 5 s (in interruptible 50 ms slices so Stop works immediately)
+      await this.delay(POLL_INTERVAL, signal);
+
+      // Re-open the calendar every poll cycle in case it auto-closed
+      RailwayAdapter.openDatePicker();
+      await this.delay(400, signal);
+    }
+
+    this.onLog(
+      `⏰ Timed out after 20 minutes waiting for journey date ${date} to become available. The booking window may not have opened. Stopping.`,
+      'error'
+    );
+    this.onStateChange(
+      AutomationState.ERROR,
+      `Journey date ${date} did not become available within 20 minutes. Try again or check the site manually.`
+    );
+    return false;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // STEP 2b — homepage form
   // ══════════════════════════════════════════════════════════════════════════
 
   /**

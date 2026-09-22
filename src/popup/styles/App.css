@@ -11,7 +11,7 @@
 .app-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   padding: 8px 12px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
@@ -22,6 +22,7 @@
 .app-header .header-brand {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
 }
 
