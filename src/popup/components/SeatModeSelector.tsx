@@ -16,14 +16,28 @@ interface OptionItem {
   mode: SeatMode;
 }
 
-const SEAT_OPTIONS: OptionItem[] = [
-  { id: '1_single', label: '1 Seat', count: 1, mode: 'single' },
-  { id: '2_adjacent', label: '2 Seats (Adjacent Pair)', count: 2, mode: 'adjacent' },
-  { id: '3_adjacent', label: '3 Seats (Adjacent)', count: 3, mode: 'adjacent' },
-  { id: '4_adjacent', label: '4 Seats (Adjacent)', count: 4, mode: 'adjacent' },
-  { id: '2_face', label: '2 Seats (Face-to-Face)', count: 2, mode: 'face_to_face' },
-  { id: '3_best', label: '3 Seats (Best Available)', count: 3, mode: 'best_available' },
-  { id: '4_best', label: '4 Seats (Best Available)', count: 4, mode: 'best_available' }
+/**
+ * The dropdown value is ALWAYS `${count}_${mode}` — and so is every option id (built below).
+ * Hand-written ids drifted from that ("2_face" vs "2_face_to_face"), so the dropdown could not
+ * find the saved option and silently displayed "1 Seat" while the engine ran with something else.
+ */
+export const seatOptionId = (count: number, mode: SeatMode): string => `${Number(count)}_${mode}`;
+
+const option = (label: string, count: number, mode: SeatMode): OptionItem => ({
+  id: seatOptionId(count, mode),
+  label,
+  count,
+  mode
+});
+
+export const SEAT_OPTIONS: OptionItem[] = [
+  option('1 Seat', 1, 'single'),
+  option('2 Seats (Adjacent Pair)', 2, 'adjacent'),
+  option('3 Seats (Adjacent)', 3, 'adjacent'),
+  option('4 Seats (Adjacent)', 4, 'adjacent'),
+  option('2 Seats (Face-to-Face)', 2, 'face_to_face'),
+  option('3 Seats (Best Available)', 3, 'best_available'),
+  option('4 Seats (Best Available)', 4, 'best_available')
 ];
 
 export const SeatModeSelector: React.FC<SeatModeSelectorProps> = ({
@@ -33,7 +47,9 @@ export const SeatModeSelector: React.FC<SeatModeSelectorProps> = ({
   onChangeMode,
   onToggleFallback
 }) => {
-  const currentKey = `${seatCount}_${seatMode}`;
+  // Number(): a count restored from storage may be the string "2"
+  const currentKey = seatOptionId(seatCount, seatMode);
+  const isKnown = SEAT_OPTIONS.some(opt => opt.id === currentKey);
 
   const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const selected = SEAT_OPTIONS.find(opt => opt.id === e.target.value);
@@ -41,6 +57,9 @@ export const SeatModeSelector: React.FC<SeatModeSelectorProps> = ({
       onChangeMode(selected.count, selected.mode);
     }
   };
+
+  // 3-4 seats "side by side" cannot exist in a 2 + 2 chair car (an aisle splits every row)
+  const multiAdjacent = seatMode === 'adjacent' && Number(seatCount) >= 3;
 
   return (
     <div className="form-group">
@@ -50,6 +69,12 @@ export const SeatModeSelector: React.FC<SeatModeSelectorProps> = ({
         value={currentKey}
         onChange={handleChange}
       >
+        {/* A saved combination that is not in the list is shown honestly instead of as "1 Seat" */}
+        {!isKnown && (
+          <option value={currentKey} disabled>
+            {`Custom: ${seatCount} seat(s) — ${seatMode}`}
+          </option>
+        )}
         {SEAT_OPTIONS.map(opt => (
           <option key={opt.id} value={opt.id}>
             {opt.label}
@@ -64,8 +89,16 @@ export const SeatModeSelector: React.FC<SeatModeSelectorProps> = ({
           onChange={(e) => onToggleFallback(e.target.checked)}
           style={{ accentColor: 'var(--accent-cyan)' }}
         />
-        Allow smart fallback if exact layout is unavailable
+        If the exact layout is unavailable, ask me before booking a different one
       </label>
+
+      {multiAdjacent && (
+        <div style={{ marginTop: '4px', fontSize: '11px', color: 'var(--text-secondary)' }}>
+          {allowFallback
+            ? `${seatCount} seats side by side only exist in 3-per-row coaches (e.g. AC_S). In 2 + 2 chair cars the bot will ask you before taking the closest match, e.g. a whole row across the aisle.`
+            : `Not asking is on: ${seatCount} seats side by side only exist in 3-per-row coaches (e.g. AC_S). In 2 + 2 chair cars (S_CHAIR, SNIGDHA…) nothing will be booked.`}
+        </div>
+      )}
     </div>
   );
 };

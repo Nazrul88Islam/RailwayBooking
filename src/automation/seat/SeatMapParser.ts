@@ -26,11 +26,13 @@ const SEAT_CODE_ATTRS = [
 ];
 const DIRECT_CODE_ATTRS = ['data-seat-name', 'data-seat', 'data-seat-number'];
 
-const SEAT_CODE_FULL_RE = /^([A-Z\u0980-\u09FF]{1,5}[-_\s]?)?\d{1,3}[A-Z]?(?:\(B\))?$/i;
-const SEAT_CODE_EMBEDDED_RE = /([A-Z\u0980-\u09FF]{1,5}\s?-\s?\d{1,3}[A-Z]?)/i;
-/** "KHA-1", "CHA-25": coach prefix + hyphen + number — what the real seat labels look like. */
-const STRICT_CODE_RE = /^[A-Z\u0980-\u09FF]{1,5}-\d{1,3}$/i;
-
+// Seat labels: chair cars "KHA-12"; berth coaches (AC_B …) "GA-UP-2", "GA-LOW-1"  (COACH-TIER-NUMBER)
+const SEAT_CODE_FULL_RE = /^([A-Z\u0980-\u09FF]{1,5}[-_\s]?)?([A-Z]{1,5}[-_\s])?\d{1,3}[A-Z]?(?:\(B\))?$/i;
+const SEAT_CODE_EMBEDDED_RE = /([A-Z\u0980-\u09FF]{1,5}\s?-\s?(?:[A-Z]{1,5}\s?-\s?)?\d{1,3}[A-Z]?)/i;
+/** "KHA-1", "CHA-25", "GA-UP-2": coach prefix [+ berth tier] + hyphen + number — the real seat labels. */
+const STRICT_CODE_RE = /^[A-Z\u0980-\u09FF]{1,5}(?:-[A-Z]{1,5})?-\d{1,3}$/i;
+/** The same grammar, for scanning free text (cart cells). */
+const CART_CODE_RE = /\b([A-Z]{1,5}(?:-[A-Z]{1,5})?-\d{1,3})(?!\d)/gi;
 
 interface Rect {
   left: number;
@@ -183,13 +185,40 @@ export class SeatMapParser {
       ? leaves.map(e => (e.textContent || '').trim()).join(' | ')
       : (scope.textContent || '');
     const codes: string[] = [];
-    const re = /\b([A-Z]{1,5})-(\d{1,3})(?!\d)/gi;
+    const re = new RegExp(CART_CODE_RE.source, 'gi');
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
-      const code = `${m[1]}-${m[2]}`.toUpperCase();
+      const code = m[1].toUpperCase();
       if (!codes.includes(code)) codes.push(code);
     }
     return codes;
+  }
+
+  /**
+   * The Seat Details panel of the page (found relative to the coach dropdown).
+   */
+  public static getSeatDetailsPanel(container: HTMLElement | Document = document): HTMLElement | null {
+    return this.findSeatDetailsPanel(container, this.findCoachSelectElement(container));
+  }
+
+  /**
+   * "GA-UP-2" stays "GA-UP-2"; a bare "2" becomes "GA-2".
+   * (The coach prefix used to be added to berth labels too, giving "GA-GA-UP-2".)
+   */
+  public static formatSeatWithCoach(seatName: string, coachName: string): string {
+    if (!seatName) return '';
+    const parts = seatName.split(/[\s,]+/);
+    return parts.map(p => {
+      const trimmed = p.trim();
+      if (!trimmed) return '';
+      if (/^[A-Z\u0980-\u09FF]{1,5}(?:-[A-Z]{1,5})?-\d+/i.test(trimmed)) {
+        return trimmed.toUpperCase();
+      }
+      if (coachName && coachName !== 'COACH-1') {
+        return `${coachName.toUpperCase()}-${trimmed.toUpperCase()}`;
+      }
+      return trimmed.toUpperCase();
+    }).filter(Boolean).join(', ');
   }
 
   /**
@@ -201,6 +230,7 @@ export class SeatMapParser {
     fallbackClass: string = ''
   ): SeatDetailRow[] {
     const coachSelect = this.findCoachSelectElement(container);
+    const activeCoach = this.detectCoachName(container);
     const panel = this.findSeatDetailsPanel(container, coachSelect);
 
     if (panel) {
@@ -215,12 +245,15 @@ export class SeatMapParser {
             const isHeader = cells.some(c => /class|seat|fare|price/i.test(c));
             if (!isHeader) {
               const className = cells[0] || fallbackClass || 'CLASS';
-              const seatName = cells[1] || '';
+              const rawSeatName = cells[1] || '';
               const fare = cells[2] || (cells.length > 2 ? cells[2] : '');
-              if (seatName && !/class|seat|fare/i.test(seatName)) {
+              if (rawSeatName && !/class|seat|fare/i.test(rawSeatName)) {
+                // Find coach for this seat from fallbackSeats if available, or activeCoach
+                const matchedCoach = fallbackSeats.find(s => s.name.toUpperCase().includes(rawSeatName.toUpperCase()))?.coach || activeCoach;
+                const formattedSeats = this.formatSeatWithCoach(rawSeatName, matchedCoach);
                 items.push({
                   className,
-                  seats: seatName,
+                  seats: formattedSeats,
                   fare: fare ? (fare.includes('৳') || fare.includes('BDT') ? fare : `৳ ${fare}`) : '৳ --'
                 });
               }
@@ -233,7 +266,13 @@ export class SeatMapParser {
     }
 
     if (fallbackSeats.length > 0) {
-      const seatNames = fallbackSeats.map(s => s.name).join(', ');
+      const seatNames = fallbackSeats.map(s => {
+        if (s.coach && !s.name.toUpperCase().startsWith(s.coach.toUpperCase() + '-')) {
+          return `${s.coach.toUpperCase()}-${s.name.toUpperCase()}`;
+        }
+        return s.name.toUpperCase();
+      }).join(', ');
+
       return [
         {
           className: fallbackClass || 'CLASS',
@@ -245,7 +284,6 @@ export class SeatMapParser {
 
     return [];
   }
-
 
   /**
    * The right-hand "Seat Details" panel: the biggest ancestor of its heading that does NOT also
@@ -319,10 +357,10 @@ export class SeatMapParser {
     return name;
   }
 
-  /** "KA-6" → "KA", "THA-15" → "THA". Returns null for synthetic names like "S-1". */
+  /** "KA-6" → "KA", "THA-15" → "THA", "GA-UP-2" → "GA". Returns null for synthetic names like "S-1". */
   public static extractCoachPrefixFromSeatCode(seatCode: string): string | null {
     if (!seatCode) return null;
-    const m = seatCode.match(/^([A-Z\u0980-\u09FF]+)[-_ ]?\d+/i);
+    const m = seatCode.match(/^([A-Z\u0980-\u09FF]+)(?:-[A-Z]{1,5})?[-_ ]?\d+/i);
     if (m && m[1]) {
       const prefix = m[1].toUpperCase();
       if (prefix === 'S') return null;
@@ -384,8 +422,11 @@ export class SeatMapParser {
     } catch { /* selector unsupported */ }
 
     const parent = el.parentElement;
-    if (parent && (parent.hasAttribute('disabled') || parent.getAttribute('aria-disabled') === 'true')) return true;
-    if (el.querySelector('input:disabled, button:disabled')) return true;
+    if (parent && typeof parent.hasAttribute === 'function' &&
+      (parent.hasAttribute('disabled') || parent.getAttribute('aria-disabled') === 'true')) return true;
+    try {
+      if (typeof el.querySelector === 'function' && el.querySelector('input:disabled, button:disabled')) return true;
+    } catch { /* selector unsupported */ }
 
     if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
       try {
@@ -428,7 +469,12 @@ export class SeatMapParser {
     const booked = BOOKED_RE.test(all) || this.isDomDisabled(el) || color === 'booked';
     const inProgress = IN_PROGRESS_RE.test(all) || color === 'progress';
 
-    const input = el.matches('input') ? (el as HTMLInputElement) : (el.querySelector('input') as HTMLInputElement | null);
+    let input: HTMLInputElement | null = null;
+    try {
+      input = typeof el.matches === 'function' && el.matches('input')
+        ? (el as HTMLInputElement)
+        : typeof el.querySelector === 'function' ? (el.querySelector('input') as HTMLInputElement | null) : null;
+    } catch { /* minimal element without a DOM */ }
     const selected =
       SELECTED_RE.test(all) ||
       el.getAttribute('aria-pressed') === 'true' ||

@@ -7,6 +7,20 @@ import { CoachSeatMap, SeatInfo } from './seat/SeatTypes';
 /** Bangladesh Railway lets you book at most 4 seats per transaction. */
 const MAX_SEATS_PER_BOOKING = 4;
 
+/** What the user is asked when the exact layout is not available. */
+export interface FallbackRequest {
+  /** e.g. "2 Seats (Adjacent Pair)" */
+  requested: string;
+  coach: string;
+  /** e.g. ["GA-UP-2", "GA-UP-4"] */
+  seats: string[];
+  /** e.g. "face-to-face (same column, next row)" */
+  arrangement: string;
+  /** Ready-to-show text (used by the default confirm() dialog). */
+  message: string;
+}
+export type ConfirmFallback = (request: FallbackRequest) => Promise<boolean>;
+
 interface SeatPlan {
   coachName: string;
   seats: SeatInfo[];
@@ -19,17 +33,29 @@ export class AutomationEngine {
   private settings: BookingSettings;
   private onStateChange: (state: AutomationState, statusText?: string, seatDetails?: SeatDetailRow[]) => void;
   private onLog: (msg: string, type: 'info' | 'success' | 'warning' | 'error') => void;
+  private confirmFallback?: ConfirmFallback;
 
+  /** URL of the train list the seat panel was opened from ("the original page"). */
+  private resultsUrl = '';
+  /** Once you approve an alternative layout you are not asked again in later rounds. */
+  private fallbackApproved = false;
+
+  /**
+   * @param confirmFallback  Called when the exact layout you asked for is not available anywhere and an
+   *                         alternative exists. Resolve `true` to book the alternative, `false` to go back
+   *                         to the original page. Optional: without it the browser's own confirm() dialog is used.
+   */
   constructor(
     settings: BookingSettings,
     onStateChange: (state: AutomationState, statusText?: string, seatDetails?: SeatDetailRow[]) => void,
-    onLog: (msg: string, type: 'info' | 'success' | 'warning' | 'error') => void
+    onLog: (msg: string, type: 'info' | 'success' | 'warning' | 'error') => void,
+    confirmFallback?: ConfirmFallback
   ) {
     this.settings = settings;
     this.onStateChange = onStateChange;
     this.onLog = onLog;
+    this.confirmFallback = confirmFallback;
   }
-
 
   /**
    * Number of seats to book. Popup/storage values often arrive as strings ("2"), and the old
@@ -308,6 +334,7 @@ export class AutomationEngine {
       );
 
       if (url.includes('/booking/train') && found) {
+        this.resultsUrl = window.location.href;
         this.onLog(`Target train '${this.settings.targetTrain}' detected in search results.`, 'success');
         return true;
       }
@@ -577,9 +604,18 @@ export class AutomationEngine {
       if (!maps.length) return this.fail('No seats could be read from the page.', 'Seat map was not loaded.');
       maps.forEach(m => this.logCoach(m));
 
-      const res = SeatSelectionEngine.selectSeats(maps, need, mode, allowFallback);
+      const exact = SeatSelectionEngine.selectSeats(maps, need, mode, false);
+      if (exact.success && exact.seats.length === need) {
+        return { coachName: exact.seats[0].coach, seats: exact.seats, modeUsed: exact.modeUsed };
+      }
+      if (!allowFallback) return this.failNoExactLayout();
+
+      const res = SeatSelectionEngine.selectSeats(maps, need, mode, true);
       if (!res.success || res.seats.length !== need) {
         return this.fail(`Seat selection failed: ${res.reason}`, res.reason || 'Seat selection failed.');
+      }
+      if (!(await this.approveAlternative(res.seats[0].coach, res.seats, res.modeUsed, res.reason, signal))) {
+        return this.declineAlternative(signal);
       }
       return { coachName: res.seats[0].coach, seats: res.seats, modeUsed: res.modeUsed, reason: res.reason };
     }
@@ -637,12 +673,7 @@ export class AutomationEngine {
       return this.fail('Could not read the seat layout of any coach.', 'Seat map was not loaded.');
     }
 
-    if (!allowFallback) {
-      return this.fail(
-        `No coach has ${need} seat(s) in mode '${mode}' and fallback is disabled.`,
-        `No coach can satisfy mode '${mode}' for ${need} seat(s).`
-      );
-    }
+    if (!allowFallback) return this.failNoExactLayout();
 
     // ── Fallback: pick the coach with the closest arrangement ──────────────
     const ranked = scanned
@@ -655,6 +686,12 @@ export class AutomationEngine {
     }
 
     const best = ranked[0];
+
+    // The exact layout does not exist in ANY coach. Nothing has been selected yet — ask first.
+    if (!(await this.approveAlternative(best.opt.coachName, best.res.seats, best.res.modeUsed, best.res.reason, signal))) {
+      return this.declineAlternative(signal);
+    }
+
     this.onLog(
       `Mode '${mode}' not available anywhere — falling back: coach ${best.opt.coachName}, ${best.res.modeUsed} (${best.res.reason || 'closest match'}).`,
       'warning'
@@ -671,6 +708,112 @@ export class AutomationEngine {
     }
 
     return { coachName: best.opt.coachName, seats: best.res.seats, modeUsed: best.res.modeUsed, reason: best.res.reason };
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Exact layout not available → ask the user (never silently book something else)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** "2 Seats (Adjacent Pair)" — same wording as the dropdown. */
+  private requestedLabel(): string {
+    const n = this.seatCount;
+    const mode = this.settings.seatMode;
+    if (n === 1) return '1 Seat';
+    if (mode === 'adjacent') return `${n} Seats (Adjacent${n === 2 ? ' Pair' : ''})`;
+    if (mode === 'face_to_face') return `${n} Seats (Face-to-Face)`;
+    if (mode === 'best_available') return `${n} Seats (Best Available)`;
+    return `${n} Seats`;
+  }
+
+  private describeArrangement(modeUsed: string, reason?: string): string {
+    const r = reason || '';
+    if (r.includes('consecutive')) return 'consecutive seat numbers, not side by side';
+    if (r.includes('face-to-face')) return 'face-to-face (same column, next row)';
+    if (r.includes('same physical row')) return 'same row, possibly across the aisle';
+    if (modeUsed === 'adjacent') return 'side by side';
+    if (modeUsed === 'face_to_face') return 'face-to-face (same column, next row)';
+    return 'closest available seats, not together';
+  }
+
+  private failNoExactLayout(): null {
+    const label = this.requestedLabel();
+    return this.fail(
+      `${label} is not available in any coach, and fallback is off — nothing was booked.`,
+      `${label} is not available (fallback is off).`
+    );
+  }
+
+  /** Ask the user; also honours Stop while the question is open. */
+  private async askUser(request: FallbackRequest, signal: AbortSignal): Promise<boolean> {
+    this.checkAborted(signal);
+    const answer: Promise<boolean> = this.confirmFallback
+      ? this.confirmFallback(request)
+      : Promise.resolve(window.confirm(request.message));
+    const aborted = new Promise<never>((_, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('Automation aborted by user')), { once: true });
+    });
+    return Promise.race([answer, aborted]);
+  }
+
+  /** true = book the alternative, false = user said no. */
+  private async approveAlternative(
+    coach: string,
+    seats: SeatInfo[],
+    modeUsed: string,
+    reason: string | undefined,
+    signal: AbortSignal
+  ): Promise<boolean> {
+    if (this.fallbackApproved) return true;
+
+    const requested = this.requestedLabel();
+    const names = seats.map(s => SeatMapParser.formatSeatWithCoach(s.name, s.coach || coach));
+    const arrangement = this.describeArrangement(modeUsed, reason);
+    const message =
+      `${requested} is not available in any coach.\n\n` +
+      `Closest alternative: coach ${coach} — ${names.join(' + ')} (${arrangement}).\n\n` +
+      `OK = book these seats instead\n` +
+      `Cancel = don't book, go back to the original page`;
+
+    this.onLog(`${requested} is not available in any coach. Asking you about: coach ${coach} — ${names.join(' + ')} (${arrangement}).`, 'warning');
+    this.onStateChange(AutomationState.ANALYZING_SEATS, `Waiting for your decision: ${requested} is not available.`);
+
+    const ok = await this.askUser({ requested, coach, seats: names, arrangement, message }, signal);
+    if (ok) {
+      this.fallbackApproved = true;
+      this.onLog('You approved the alternative seats — continuing.', 'success');
+    }
+    return ok;
+  }
+
+  private async declineAlternative(signal: AbortSignal): Promise<null> {
+    this.onLog('You chose not to book the alternative seats.', 'warning');
+    await this.returnToOriginalPage(signal);
+    return null;
+  }
+
+  /**
+   * "No" → nothing is booked and the page goes back to where the seat panel was opened from
+   * (the train list): first via the panel's own Close link, otherwise by reloading that page.
+   */
+  private async returnToOriginalPage(signal: AbortSignal): Promise<void> {
+    // Nothing was selected yet, but never leave held seats behind
+    await this.clearCart(signal);
+
+    const closeBtn = RailwayAdapter.findCloseSeatPanelButton();
+    if (closeBtn) {
+      this.onLog('Closing the seat panel…', 'info');
+      closeBtn.click();
+      await this.delay(600, signal);
+    }
+
+    const stillOpen = RailwayAdapter.isSeatMapVisible();
+    this.onStateChange(AutomationState.IDLE, 'Cancelled — alternative seats declined. Nothing was booked; back on the original page.');
+    this.onLog('Back on the original page. Nothing was booked.', 'info');
+
+    if (stillOpen) {
+      if (this.resultsUrl && window.location.href !== this.resultsUrl) window.location.href = this.resultsUrl;
+      else window.location.reload();
+    }
   }
 
   // ── The "Seat Details" table is the source of truth ─────────────────────
@@ -700,7 +843,7 @@ export class AutomationEngine {
   }
 
   private hasStrictCode(seat: SeatInfo): boolean {
-    return /^[A-Z\u0980-\u09FF]{1,5}-\d{1,3}$/i.test(seat.name);
+    return /^[A-Z\u0980-\u09FF]{1,5}(?:-[A-Z]{1,5})?-\d{1,3}$/i.test(seat.name);
   }
 
   /** Deselect one seat, wherever it is: switch to its coach, click it, wait until the cart drops it. */
@@ -860,8 +1003,10 @@ export class AutomationEngine {
       const plan = await this.planBestSeats(excluded, signal);
       if (!plan) return null;
 
+      const seatCodeList = plan.seats.map(s => SeatMapParser.formatSeatWithCoach(s.name, s.coach || plan.coachName)).join(', ');
+
       this.onLog(
-        `Selecting ${plan.seats.length} seat(s) in coach ${plan.coachName} [${plan.modeUsed}${plan.reason ? ' — ' + plan.reason : ''}]: ${plan.seats.map(s => s.name).join(', ')}`,
+        `Selecting ${plan.seats.length} seat(s) in coach ${plan.coachName} [${plan.modeUsed}${plan.reason ? ' — ' + plan.reason : ''}]: ${seatCodeList}`,
         'success'
       );
 
@@ -935,7 +1080,7 @@ export class AutomationEngine {
 
     this.onStateChange(
       AutomationState.SELECTING_SEATS,
-      `Selected ${selectedCount} ${this.settings.seatClass} seat(s): ${selectedSeats.map(s => s.name).join(', ')}`,
+      `Selected ${selectedCount} ${this.settings.seatClass} seat(s): ${selectedSeats.map(s => SeatMapParser.formatSeatWithCoach(s.name, s.coach)).join(', ')}`,
       seatDetails
     );
 
@@ -962,7 +1107,6 @@ export class AutomationEngine {
       `Continue clicked with ${selectedCount} ${this.settings.seatClass} seat(s).`,
       seatDetails
     );
-
 
     // Give the next screen up to ~4s to show a halt condition BEFORE declaring completion.
     for (let i = 0; i < 8; i++) {

@@ -64,6 +64,15 @@ export class RailwayAdapter {
     return null;
   }
 
+  /** MouseEvent with `view: window`; falls back to no view where the environment rejects it. */
+  private static createMouseEvent(type: string): MouseEvent {
+    try {
+      return new MouseEvent(type, { bubbles: true, cancelable: true, view: window });
+    } catch {
+      return new MouseEvent(type, { bubbles: true, cancelable: true });
+    }
+  }
+
   private static normText(text: string | null | undefined): string {
     return (text || '').replace(/\s+/g, ' ').trim();
   }
@@ -850,8 +859,8 @@ export class RailwayAdapter {
     }
 
     targetBookBtn.focus();
-    targetBookBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-    targetBookBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+    targetBookBtn.dispatchEvent(this.createMouseEvent('mousedown'));
+    targetBookBtn.dispatchEvent(this.createMouseEvent('mouseup'));
     targetBookBtn.click();
 
     console.log(`[Railway] Book clicked for ${targetTrain} / ${seatClass}`);
@@ -888,6 +897,20 @@ export class RailwayAdapter {
         txt.includes('CHOICE COACH')
       );
     });
+  }
+
+  /**
+   * The "Close" link of the seat panel (bottom right of Seat Details). Clicking it closes the seat
+   * map and returns to the train list. Only looks INSIDE the Seat Details panel so it can never
+   * hit an unrelated "Close" (cookie banner, other modal…).
+   */
+  public static findCloseSeatPanelButton(): HTMLElement | null {
+    const panel = SeatMapParser.getSeatDetailsPanel(document);
+    if (!panel) return null;
+    const candidates = Array.from(panel.querySelectorAll('a, button, [role="button"]')) as HTMLElement[];
+    return (
+      candidates.find(el => /^(close|বন্ধ)$/i.test(this.normText(el.textContent)) && this.isVisible(el)) || null
+    );
   }
 
   /**

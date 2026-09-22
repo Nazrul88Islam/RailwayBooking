@@ -1,7 +1,9 @@
+/// <reference types="vitest" />
 import { defineConfig, build } from 'vite';
 import react from '@vitejs/plugin-react';
 import { resolve } from 'path';
 import { copyFileSync, mkdirSync, existsSync } from 'fs';
+
 
 function buildStandaloneScriptsPlugin() {
   return {
