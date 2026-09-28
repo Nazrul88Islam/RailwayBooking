@@ -99,6 +99,12 @@ export const SeatModeSelector: React.FC<SeatModeSelectorProps> = ({
             : `Not asking is on: ${seatCount} seats side by side only exist in 3-per-row coaches (e.g. AC_S). In 2 + 2 chair cars (S_CHAIR, SNIGDHA…) nothing will be booked.`}
         </div>
       )}
+
+      {seatMode === 'adjacent' && Number(seatCount) === 2 && (
+        <div style={{ marginTop: '4px', fontSize: '11px', color: '#38bdf8' }}>
+          💡 In AC_B / AC_S berth coaches, 2 Adjacent Seats will search for a Single Cabin (Coupe: LO-1 & LO-2) first across all coaches. If unavailable, it will ask before booking from a Double Cabin.
+        </div>
+      )}
     </div>
   );
 };

@@ -63,6 +63,17 @@ export class SeatRelationshipAnalyzer {
    * by side (15 is the end of one row, 16 the start of the next). Used only as a fallback.
    */
   public static findConsecutiveNumberSeats(coach: CoachSeatMap, count: number): SeatInfo[][] {
+    // Check if seat numbers in the coach repeat (e.g. A1, B1 both produce number 1 -> column labels)
+    const numCounts = new Map<number, number>();
+    for (const s of coach.seats) {
+      const n = seatNumber(s.name);
+      if (!isNaN(n)) {
+        numCounts.set(n, (numCounts.get(n) || 0) + 1);
+      }
+    }
+    const hasDuplicateNumbers = Array.from(numCounts.values()).some(c => c > 1);
+    if (hasDuplicateNumbers) return [];
+
     const numbered = coach.seats
       .filter(s => s.isAvailable && !isNaN(seatNumber(s.name)))
       .map(s => ({ s, n: seatNumber(s.name) }))
@@ -140,5 +151,57 @@ export class SeatRelationshipAnalyzer {
     });
 
     return validGroups;
+  }
+
+  /**
+   * True if a seat class is a berth / sleeper class (e.g. AC_B, AC_S, F_BERTH).
+   */
+  public static isBerthClass(seatClass: string): boolean {
+    return /AC[-_ ]?[BS]|BERTH|SLEEPER|F[-_ ]?BERTH/i.test(seatClass || '');
+  }
+
+  /**
+   * True if a seat is inside a Single Cabin (Coupe).
+   * - In AC_B (2 berths per row): berths {1,2}, {7,8}, {9,10}, {11,12}, {17,18} form Single Cabins.
+   *   (Berths {3..6} and {13..16} form First and Second Double Cabins).
+   * - In AC_S (3 berths per row): berths 13..21 form 1st, 2nd, 3rd Single Cabins (13..15, 16..18, 19..21).
+   *   (Berths 1..12 and 22..33 form 1st, 2nd, 3rd, 4th Double Cabins).
+   */
+  public static isSingleCabinSeat(seatName: string, row?: number, seatClass?: string): boolean {
+    const n = seatNumber(seatName);
+    if (!isNaN(n)) {
+      if (seatClass && /AC[-_ ]?S/i.test(seatClass)) {
+        return n >= 13 && n <= 21;
+      }
+      // In AC_B: berths {3..6} (First Double Cabin) and {13..16} (Second Double Cabin) are Double Cabin berths.
+      // All other berth pairs (1,2; 7,8; 9,10; 11,12; 17,18) are Single Cabins!
+      const isAcBDoubleCabin = (n >= 3 && n <= 6) || (n >= 13 && n <= 16);
+      return !isAcBDoubleCabin;
+    }
+    return row !== 2 && row !== 3 && row !== 7 && row !== 8;
+  }
+
+  /**
+   * True if all seats in the group belong to a Single Cabin (Coupe).
+   */
+  public static isSingleCabinGroup(group: SeatInfo[], seatClass?: string): boolean {
+    if (!group || group.length === 0) return false;
+    return group.every(s => SeatRelationshipAnalyzer.isSingleCabinSeat(s.name, s.row, seatClass));
+  }
+
+  /**
+   * Find adjacent seats specifically in a Single Cabin (Coupe).
+   */
+  public static findSingleCabinAdjacentSeats(coach: CoachSeatMap, count: number = 2, seatClass?: string): SeatInfo[][] {
+    const adjacent = this.findAdjacentSeats(coach, count);
+    return adjacent.filter(group => this.isSingleCabinGroup(group, seatClass));
+  }
+
+  /**
+   * Find adjacent seats specifically in a Double Cabin (4-berth or 6-berth cabin).
+   */
+  public static findDoubleCabinAdjacentSeats(coach: CoachSeatMap, count: number = 2, seatClass?: string): SeatInfo[][] {
+    const adjacent = this.findAdjacentSeats(coach, count);
+    return adjacent.filter(group => !this.isSingleCabinGroup(group, seatClass));
   }
 }

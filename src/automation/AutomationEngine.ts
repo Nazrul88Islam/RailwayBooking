@@ -1,7 +1,9 @@
 import { BookingSettings, AutomationState, LogItem, SeatDetailRow } from '../shared/types';
 import { RailwayAdapter, CoachOption } from '../content/railway/RailwayAdapter';
+import { RAILWAY_SELECTORS } from '../content/railway/selectors';
 import { SeatMapParser } from './seat/SeatMapParser';
 import { SeatSelectionEngine } from './seat/SeatSelectionEngine';
+import { SeatRelationshipAnalyzer } from './seat/SeatRelationshipAnalyzer';
 import { CoachSeatMap, SeatInfo } from './seat/SeatTypes';
 
 /** Bangladesh Railway lets you book at most 4 seats per transaction. */
@@ -132,9 +134,26 @@ export class AutomationEngine {
    * True only for the real Railway homepage (path "/"), including URLs with ?query or #hash.
    * (The old exact-string comparison missed e.g. "/?lang=en", so the form was never filled.)
    */
+  /**
+   * True if current page is the Railway search form page (homepage, /en, /home, /booking, or any page with From Station input).
+   */
   private isHomePage(): boolean {
+    const url = window.location.href.toLowerCase();
+    if (url.includes('/booking/train/search') || url.includes('/booking/seat')) {
+      return false;
+    }
+
     const { hostname, pathname } = window.location;
-    return hostname.endsWith('railway.gov.bd') && (pathname === '/' || pathname === '');
+    if (hostname.endsWith('railway.gov.bd')) {
+      if (pathname === '/' || pathname === '' || pathname === '/home' || pathname.startsWith('/en') || pathname === '/booking') {
+        return true;
+      }
+    }
+
+    // Direct DOM check — if From Station input is present, it's a search form page
+    const fromInput = RailwayAdapter.findElement(RAILWAY_SELECTORS.fromStationInput) ||
+                      RailwayAdapter.findElementByText('input', 'from');
+    return !!fromInput;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -227,102 +246,33 @@ export class AutomationEngine {
   // STEP 2a — wait until the booking date is open on the site
   // ══════════════════════════════════════════════════════════════════════════
 
-  /**
-   * Before the site opens booking for a date (e.g. Oct 1 tickets open at 8:00 AM),
-   * the day cell is either absent from the calendar or marked disabled.  This method
-   * polls the date-picker every 5 seconds for up to 20 minutes from the moment Start
-   * was pressed.  As soon as the target date becomes selectable it returns `true` so
-   * the normal form-fill + search flow can begin.
-   *
-   * If the calendar cannot be opened at all (no date input found on the page) we skip
-   * this check and let `fillFormAndSearch` handle it — the site may already show the
-   * right results or an input-less flow may be used.
-   */
   private async waitUntilDateAvailable(signal: AbortSignal): Promise<boolean> {
     this.checkAborted(signal);
 
     const date = this.settings.journeyDate;
     if (!date) return true; // no date configured → skip wait
 
-    // Maximum wait = 20 minutes from now
-    const MAX_WAIT_MS    = 20 * 60 * 1000;
-    const POLL_INTERVAL  = 5_000; // 5 seconds between each calendar peek
-    const startedAt      = Date.now();
-    const deadline       = startedAt + MAX_WAIT_MS;
-
-    // ── First, open the calendar and do an immediate check ────────────────
+    // Attempt quick calendar check
     const pickerOpened = RailwayAdapter.openDatePicker();
     if (!pickerOpened) {
-      // Date input not found on this page — skip the wait entirely
-      this.onLog(
-        `Date-picker not found on the page — skipping date-availability check (will attempt to set date during form fill).`,
-        'info'
-      );
       return true;
     }
 
-    // Give the calendar a moment to render
-    await this.delay(400, signal);
+    await this.delay(300, signal);
 
-    let attempt = 0;
-    while (Date.now() < deadline) {
-      this.checkAborted(signal);
-      attempt++;
-
-      const status = RailwayAdapter.isJourneyDateAvailable(date);
-      const elapsedSec  = Math.round((Date.now() - startedAt) / 1000);
-      const remainingSec = Math.max(0, Math.round((deadline - Date.now()) / 1000));
-      const remainingMin = Math.floor(remainingSec / 60);
-      const remainingSs  = remainingSec % 60;
-
-      if (status === 'available') {
-        this.onLog(
-          `✅ Journey date ${date} is now available in the calendar (check #${attempt}, elapsed ${elapsedSec}s). Proceeding with booking.`,
-          'success'
-        );
-        this.onStateChange(AutomationState.SELECTING_DATE, `Date ${date} is open — starting booking...`);
-        // Close the calendar so the subsequent form-fill can open it cleanly
-        document.body.click();
-        await this.delay(200, signal);
-        return true;
-      }
-
-      if (status === 'disabled') {
-        this.onLog(
-          `⏳ Date ${date} is visible but still disabled (check #${attempt}). Waiting... [${remainingMin}m ${remainingSs}s remaining]`,
-          'warning'
-        );
-      } else {
-        // 'not_visible': calendar might have closed; re-open it
-        this.onLog(
-          `⏳ Date ${date} not yet in calendar (check #${attempt}) — booking window not open yet. [${remainingMin}m ${remainingSs}s remaining]`,
-          'info'
-        );
-        RailwayAdapter.openDatePicker();
-      }
-
-      this.onStateChange(
-        AutomationState.WAITING_FOR_BOOKING_TIME,
-        `Waiting for ${date} to open on the site... [${remainingMin}m ${remainingSs}s left]`
-      );
-
-      // Wait 5 s (in interruptible 50 ms slices so Stop works immediately)
-      await this.delay(POLL_INTERVAL, signal);
-
-      // Re-open the calendar every poll cycle in case it auto-closed
-      RailwayAdapter.openDatePicker();
-      await this.delay(400, signal);
+    const status = RailwayAdapter.isJourneyDateAvailable(date);
+    if (status === 'available') {
+      this.onLog(`✅ Journey date ${date} is available. Proceeding with form fill.`, 'success');
+      document.body.click();
+      await this.delay(150, signal);
+      return true;
     }
 
-    this.onLog(
-      `⏰ Timed out after 20 minutes waiting for journey date ${date} to become available. The booking window may not have opened. Stopping.`,
-      'error'
-    );
-    this.onStateChange(
-      AutomationState.ERROR,
-      `Journey date ${date} did not become available within 20 minutes. Try again or check the site manually.`
-    );
-    return false;
+    // If date is not immediately verified in popover, proceed directly to form fill where value is typed into input
+    this.onLog(`Proceeding with form fill for journey date: ${date}`, 'info');
+    document.body.click();
+    await this.delay(100, signal);
+    return true;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -330,87 +280,125 @@ export class AutomationEngine {
   // ══════════════════════════════════════════════════════════════════════════
 
   /**
-   * Fills From / To / Date / Class and submits the search.
-   * Returns true when the search results are showing (SPA navigation worked),
-   * false when we had to hard-navigate (page reloads and this engine instance dies).
+   * Fills the homepage form (From → To → Date → Class → Search).
+   *
+   * Strategy:
+   *  1. Type into "From Station" and "To Station" autocomplete inputs.
+   *  2. Set the journey date via the datepicker.
+   *  3. Select the seat class from the dropdown.
+   *  4. Click the Search button.
+   *  5. Wait up to 8 s for the SPA to navigate to search results.
+   *  6. If still on homepage after 8 s → fall back to direct URL navigation.
+   *
+   * Returns:
+   *  - true  → search results are now showing (stay in this engine instance)
+   *  - false → page navigation was triggered (engine dies; content script resumes)
    */
   private async fillFormAndSearch(signal: AbortSignal): Promise<boolean> {
     this.checkAborted(signal);
-    this.onStateChange(AutomationState.SELECTING_ROUTE, `Setting route ${this.settings.fromStation} → ${this.settings.toStation}`);
+    this.onStateChange(
+      AutomationState.SELECTING_ROUTE,
+      `Setting route ${this.settings.fromStation} → ${this.settings.toStation}`
+    );
 
-    this.onLog(`Selecting origin: ${this.settings.fromStation}`, 'info');
-    await RailwayAdapter.selectStation('from', this.settings.fromStation, this.settings.actionDelay, signal);
+    // ── 1. From Station ──────────────────────────────────────────────────
+    this.onLog(`Typing From Station: "${this.settings.fromStation}"`, 'info');
+    const fromOk = await RailwayAdapter.selectStation(
+      'from', this.settings.fromStation, this.settings.actionDelay, signal
+    );
+    if (!fromOk) {
+      this.onLog('⚠ "From Station" input not found in DOM. Skipping — will try URL navigation.', 'warning');
+    }
 
     this.checkAborted(signal);
-    this.onLog(`Selecting destination: ${this.settings.toStation}`, 'info');
-    await RailwayAdapter.selectStation('to', this.settings.toStation, this.settings.actionDelay, signal);
+    await this.delay(400, signal);
+
+    // ── 2. To Station ────────────────────────────────────────────────────
+    this.onLog(`Typing To Station: "${this.settings.toStation}"`, 'info');
+    const toOk = await RailwayAdapter.selectStation(
+      'to', this.settings.toStation, this.settings.actionDelay, signal
+    );
+    if (!toOk) {
+      this.onLog('⚠ "To Station" input not found in DOM. Skipping — will try URL navigation.', 'warning');
+    }
 
     this.checkAborted(signal);
-    this.onStateChange(AutomationState.SELECTING_DATE, `Setting journey date: ${this.settings.journeyDate}`);
+    await this.delay(300, signal);
+
+    // ── 3. Journey Date ──────────────────────────────────────────────────
+    this.onStateChange(AutomationState.SELECTING_DATE, `Setting date: ${this.settings.journeyDate}`);
     this.onLog(`Setting journey date: ${this.settings.journeyDate}`, 'info');
     await RailwayAdapter.selectJourneyDate(this.settings.journeyDate, this.settings.actionDelay, signal);
 
     this.checkAborted(signal);
+    await this.delay(300, signal);
+
+    // ── 4. Seat Class ────────────────────────────────────────────────────
     if (this.settings.seatClass) {
       this.onLog(`Selecting seat class: ${this.settings.seatClass}`, 'info');
-      await this.delay(150, signal);
-      await RailwayAdapter.selectClass(this.settings.seatClass, this.settings.actionDelay, signal);
+      const classOk = await RailwayAdapter.selectClass(
+        this.settings.seatClass, this.settings.actionDelay, signal
+      );
+      if (!classOk) {
+        this.onLog('⚠ Seat class dropdown not found or class not in options.', 'warning');
+      }
+      await this.delay(200, signal);
     }
 
     this.checkAborted(signal);
-    this.onStateChange(AutomationState.SEARCHING, 'Submitting train search query...');
+    this.onStateChange(AutomationState.SEARCHING, 'Clicking Search Train button...');
     this.onLog('Clicking Search Train button...', 'info');
 
-    // Prefer the specific search button; a generic submit button may be Login etc.
+    // ── 5. Search Button ─────────────────────────────────────────────────
     const searchBtn =
       RailwayAdapter.findElement(['.btn-booking-search', 'button.search-train-btn', '.search-btn']) ||
       RailwayAdapter.findElementByText('button', 'search') ||
+      RailwayAdapter.findElementByText('button', 'Search') ||
       RailwayAdapter.findElement(['button[type="submit"]']);
 
     if (searchBtn) {
+      this.onLog(`Found search button: <${searchBtn.tagName}> "${(searchBtn.textContent || '').trim()}"`, 'info');
       searchBtn.focus();
       searchBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
       searchBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
       searchBtn.click();
     } else {
-      this.onLog('Search button not found — will fall back to direct URL navigation.', 'warning');
+      this.onLog('⚠ Search button not found — going straight to URL navigation.', 'warning');
     }
 
-    // Wait up to 4.5s for the SPA to navigate to search results organically
-    let searchNavigatedOrRendered = false;
-    for (let i = 0; i < 15; i++) {
+    // ── 6. Wait up to 8 s for search results ────────────────────────────
+    const TRAIN_CARD_SEL =
+      '.train-item, .train-card, .single-train-details, .search-result-item, [class*="single-train"]';
+
+    for (let i = 0; i < 27; i++) {           // 27 × 300 ms = ~8 s
       this.checkAborted(signal);
       await this.delay(300, signal);
-      const hasCards = document.querySelectorAll(
-        '.train-item, .train-card, .single-train-details, .search-result-item, [class*="single-train"]'
-      ).length > 0;
-      if (window.location.href.includes('/booking/train/search') || hasCards) {
-        searchNavigatedOrRendered = true;
-        this.onLog('SPA search submission completed naturally.', 'info');
-        break;
+
+      const onSearchPage = window.location.href.includes('/booking/train/search');
+      const hasCards    = document.querySelectorAll(TRAIN_CARD_SEL).length > 0;
+
+      if (onSearchPage || hasCards) {
+        this.onLog('✅ Search results are showing — form fill succeeded.', 'success');
+        return true;
       }
     }
 
-    if (!searchNavigatedOrRendered) {
-      this.onLog(
-        `SPA search form did not respond after 4.5s. Navigating via URL as last resort: ${this.settings.fromStation} → ${this.settings.toStation} (${this.settings.journeyDate})`,
-        'warning'
-      );
-      RailwayAdapter.navigateToSearchResults(
-        this.settings.fromStation,
-        this.settings.toStation,
-        this.settings.journeyDate,
-        this.settings.seatClass
-      );
-      // The page reloads and THIS engine instance is destroyed. Your content script must
-      // re-create the engine and call start() again after reload (persist a "running" flag),
-      // otherwise the bot will appear to stop right here.
-      this.onLog('Page is reloading — the content script must resume automation after reload.', 'warning');
-      return false;
-    }
-
-    return true;
+    // ── 7. Fallback: URL navigation ───────────────────────────────────────
+    this.onLog(
+      `Form did not produce results after 8 s. ` +
+      `Navigating via URL: ${this.settings.fromStation} → ${this.settings.toStation}`,
+      'warning'
+    );
+    RailwayAdapter.navigateToSearchResults(
+      this.settings.fromStation,
+      this.settings.toStation,
+      this.settings.journeyDate,
+      this.settings.seatClass
+    );
+    this.onLog('URL navigation triggered — automation will auto-resume after page loads.', 'info');
+    return false;
   }
+
 
   // ══════════════════════════════════════════════════════════════════════════
   // STEP 3 — wait for the target train to show up in the results
@@ -692,9 +680,39 @@ export class AutomationEngine {
     const need = this.seatCount;
     const mode = this.settings.seatMode;
     const allowFallback = this.settings.allowFallback;
+    const isBerth = SeatRelationshipAnalyzer.isBerthClass(this.settings.seatClass);
+    const is2AdjacentBerth = need === 2 && mode === 'adjacent' && isBerth;
 
     // ── Page without a coach dropdown (single view or coach tabs) ──────────
     if (!RailwayAdapter.hasCoachDropdown()) {
+      if (is2AdjacentBerth) {
+        for (let i = 0; i < 8; i++) {
+          this.checkAborted(signal);
+          const maps = this.readMaps(excluded);
+          if (maps.length) {
+            const singleMatch = SeatSelectionEngine.selectSeats(maps, need, mode, false, { cabinFilter: 'single' });
+            if (singleMatch.success && singleMatch.seats.length === need) {
+              return { coachName: singleMatch.seats[0].coach, seats: singleMatch.seats, modeUsed: singleMatch.modeUsed, reason: 'Single Cabin (Coupe)' };
+            }
+          }
+          if (!RailwayAdapter.clickAvailableCoachTab()) break;
+          await this.delay(450, signal);
+        }
+
+        const maps = this.readMaps(excluded);
+        if (!maps.length) return this.fail('No seats could be read from the page.', 'Seat map was not loaded.');
+        maps.forEach(m => this.logCoach(m));
+
+        const doubleMatch = SeatSelectionEngine.selectSeats(maps, need, mode, false, { cabinFilter: 'double' });
+        if (doubleMatch.success && doubleMatch.seats.length === need) {
+          if (!(await this.approveAlternative(doubleMatch.seats[0].coach, doubleMatch.seats, mode, 'Double Cabin (Single Cabin unavailable)', signal))) {
+            return this.declineAlternative(signal);
+          }
+          return { coachName: doubleMatch.seats[0].coach, seats: doubleMatch.seats, modeUsed: mode, reason: 'Double cabin after user approval' };
+        }
+        return this.fail('Single cabin for 2 adjacent seats is not available, and double cabin has no 2 adjacent seats either.', 'No 2 adjacent seats available in single or double cabin.');
+      }
+
       for (let i = 0; i < 8; i++) {
         this.checkAborted(signal);
         const maps = this.readMaps(excluded);
@@ -766,6 +784,18 @@ export class AutomationEngine {
       }
 
       this.logCoach(map);
+      scanned.push({ opt, map });
+
+      // If booking 2 adjacent berths in AC_B / AC_S, strictly try Single Cabin first!
+      if (is2AdjacentBerth) {
+        const singleMatch = SeatSelectionEngine.selectSeats([map], need, mode, false, { cabinFilter: 'single', seatClass: this.settings.seatClass });
+        if (singleMatch.success && singleMatch.seats.length === need) {
+          this.onLog(`Coach ${opt.coachName} satisfies Single Cabin (Coupe) for 2 adjacent seats: ${singleMatch.seats.map(s => s.name).join(', ')}.`, 'success');
+          return { coachName: opt.coachName, seats: singleMatch.seats, modeUsed: mode, reason: 'Single Cabin (Coupe)' };
+        }
+        this.onLog(`Coach ${opt.coachName}: Single cabin for two adjacent seats is not available. Skipping double cabin to search other coaches...`, 'info');
+        continue;
+      }
 
       const strict = SeatSelectionEngine.selectSeats([map], need, mode, false);
       if (strict.success && strict.seats.length === need) {
@@ -774,11 +804,64 @@ export class AutomationEngine {
       }
 
       this.onLog(`Coach ${opt.coachName} cannot satisfy mode '${mode}' for ${need} seat(s).`, 'info');
-      scanned.push({ opt, map });
     }
 
     if (!scanned.length) {
       return this.fail('Could not read the seat layout of any coach.', 'Seat map was not loaded.');
+    }
+
+    // Special handling for 2 Adjacent Seats in AC_B / AC_S when Single Cabin is unavailable in ALL coaches
+    if (is2AdjacentBerth) {
+      this.onLog(`Single cabin for 2 adjacent seats is not available in any coach. Checking double cabin options...`, 'warning');
+
+      const doubleScanned = scanned
+        .map(s => ({ ...s, res: SeatSelectionEngine.selectSeats([s.map], need, mode, false, { cabinFilter: 'double', seatClass: this.settings.seatClass }) }))
+        .filter(r => r.res.success && r.res.seats.length === need);
+
+      if (doubleScanned.length > 0) {
+        const doubleBest = doubleScanned[0];
+        const requested = '2 Seats (Adjacent Pair) [Single Cabin]';
+        const names = doubleBest.res.seats.map(s => SeatMapParser.formatSeatWithCoach(s.name, s.coach || doubleBest.opt.coachName));
+        const message =
+          `Single cabin for 2 adjacent seats is not available in any coach.\n\n` +
+          `Would you like to book 2 adjacent seats from a double cabin instead?\n` +
+          `(Coach ${doubleBest.opt.coachName} — ${names.join(' + ')})\n\n` +
+          `OK = book 2 adjacent seats from double cabin\n` +
+          `Cancel = stop automation so you can search manually`;
+
+        this.onLog(`Single cabin is not available. Asking user about booking from double cabin (${doubleBest.opt.coachName} — ${names.join(' + ')})...`, 'warning');
+
+        const approved = await this.askUser({
+          requested,
+          coach: doubleBest.opt.coachName,
+          seats: names,
+          arrangement: '2 adjacent seats in Double Cabin (Single cabin unavailable)',
+          message
+        }, signal);
+
+        if (approved) {
+          this.fallbackApproved = true;
+          this.onLog('You approved shifting to double cabin for 2 adjacent seats — continuing.', 'success');
+
+          if (lastLoaded && doubleBest.opt.index !== lastLoaded.index) {
+            const map = await this.loadCoach(doubleBest.opt, excluded, signal);
+            if (!map) return this.fail(`Could not reload coach ${doubleBest.opt.coachName}.`, 'Seat map was not loaded.');
+            const res = SeatSelectionEngine.selectSeats([map], need, mode, false, { cabinFilter: 'double' });
+            if (!res.success || res.seats.length !== need) {
+              return this.fail(`Seat selection failed: ${res.reason}`, res.reason || 'Seat selection failed.');
+            }
+            return { coachName: doubleBest.opt.coachName, seats: res.seats, modeUsed: mode, reason: 'Shifted to double cabin after approval' };
+          }
+          return { coachName: doubleBest.opt.coachName, seats: doubleBest.res.seats, modeUsed: mode, reason: 'Shifted to double cabin after approval' };
+        } else {
+          return this.declineAlternative(signal);
+        }
+      } else {
+        return this.fail(
+          'Single cabin for 2 adjacent seats is not available in any coach, and double cabin does not have 2 adjacent seats either.',
+          'No 2 adjacent seats available in single or double cabin.'
+        );
+      }
     }
 
     if (!allowFallback) return this.failNoExactLayout();

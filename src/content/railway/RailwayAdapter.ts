@@ -201,7 +201,7 @@ export class RailwayAdapter {
   // ────────────────────────────────────────────────────────────────────────
 
   /**
-   * Select station from dropdown or autocomplete list
+   * Select station from dropdown or autocomplete list.
    */
   public static async selectStation(
     type: 'from' | 'to',
@@ -210,23 +210,40 @@ export class RailwayAdapter {
     signal?: AbortSignal
   ): Promise<boolean> {
     const selectors = type === 'from' ? RAILWAY_SELECTORS.fromStationInput : RAILWAY_SELECTORS.toStationInput;
-    let inputEl = this.findElement(selectors) as HTMLInputElement;
+    let inputEl = this.findElement(selectors) as HTMLInputElement | null;
 
     if (!inputEl) {
-      inputEl = this.findElementByText('input', type === 'from' ? 'from' : 'to') as HTMLInputElement;
+      const directionWord = type === 'from' ? 'from' : 'to';
+      inputEl = this.findElementByText('input', directionWord) as HTMLInputElement | null;
     }
 
-    if (!inputEl) return false;
+    if (!inputEl) {
+      console.warn(`[RailwayAdapter] ${type} station input not found in DOM.`);
+      return false;
+    }
 
     await this.typeWithHumanPacing(inputEl, stationName, baseDelayMs, signal);
 
     // Wait brief moment for dropdown suggestions to open
     await new Promise(r => setTimeout(r, Math.min(baseDelayMs, 300)));
 
-    // Click first suggestion if dropdown opened
-    const dropdownItem = document.querySelector('.select2-results__option, .autocomplete-item, .ui-menu-item, [class*="option"], [class*="suggestion"], [class*="autocomplete"] li');
-    if (dropdownItem) {
-      (dropdownItem as HTMLElement).click();
+    // Click matching or first suggestion if dropdown opened
+    const OPTION_SELECTORS =
+      'mat-option, .mat-option, .mat-autocomplete-panel mat-option, ' +
+      '.ng-option, [class*="autocomplete"] li, [class*="suggestion"] li, ' +
+      '[class*="option"]:not(select):not(option), li[role="option"], ' +
+      '.select2-results__option, .autocomplete-item, .ui-menu-item';
+
+    const options = Array.from(document.querySelectorAll(OPTION_SELECTORS)) as HTMLElement[];
+    if (options.length > 0) {
+      const nameUpper = stationName.toUpperCase();
+      const match = options.find(el => (el.textContent || '').toUpperCase().includes(nameUpper));
+      const chosen = match || options[0];
+      chosen.click();
+    } else {
+      inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      await new Promise(r => setTimeout(r, 100));
+      inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     }
 
     return true;
@@ -283,53 +300,57 @@ export class RailwayAdapter {
     if (parts.length < 3) return false;
 
     const [yearStr, monthStr, dayStr] = parts;
-    const dayNum = parseInt(dayStr, 10);
+    const dayNum  = parseInt(dayStr,  10);
     const monthNum = parseInt(monthStr, 10);
-    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const monthName = monthNames[monthNum - 1] || 'Sep';
+    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const monthName  = monthNames[monthNum - 1] || 'Sep';
 
-    const formatDDMMMYYYY = `${dayStr}-${monthName}-${yearStr}`; // 30-Sep-2026
-    const formatYYYYMMDD = `${yearStr}-${monthStr}-${dayStr}`;   // 2026-09-30
-    const formatDDMMYYYY = `${dayStr}/${monthStr}/${yearStr}`;   // 30/09/2026
-
+    // Click to open the datepicker overlay
     inputEl.focus();
     inputEl.click();
     await new Promise(r => setTimeout(r, 150));
 
-    // Try primary format (DD-MMM-YYYY)
+    // Try primary format (DD-MMM-YYYY, e.g. 30-Sep-2026)
+    const formatDDMMMYYYY = `${dayStr.padStart(2, '0')}-${monthName}-${yearStr}`;
     this.setInputValue(inputEl, formatDDMMMYYYY);
     await new Promise(r => setTimeout(r, 100));
 
     if (!inputEl.value) {
-      this.setInputValue(inputEl, formatYYYYMMDD);
+      this.setInputValue(inputEl, `${yearStr}-${monthStr}-${dayStr}`);
       await new Promise(r => setTimeout(r, 100));
     }
 
     if (!inputEl.value) {
-      this.setInputValue(inputEl, formatDDMMYYYY);
+      this.setInputValue(inputEl, `${dayStr.padStart(2, '0')}/${monthStr}/${yearStr}`);
       await new Promise(r => setTimeout(r, 100));
     }
 
-    // Check if calendar popover opened
-    const calendarDays = Array.from(document.querySelectorAll(
-      '.react-datepicker__day, .datepicker-day, .day-cell, [class*="day"]'
-    ));
+    // ── Click the correct day in whichever calendar library is open ───────
+    let calDays = Array.from(document.querySelectorAll(
+      '.mat-calendar-body-cell, .mat-calendar-body-cell-content, ' +
+      '.mat-datepicker-content .mat-calendar-body td, ' +
+      '.bs-datepicker-body td, .bs-datepicker-body td span, ' +
+      '.react-datepicker__day, .datepicker-day, .day-cell, [class*="day"]:not([class*="day-name"]):not([class*="weekday"])'
+    )) as HTMLElement[];
 
     const dayPad3 = dayStr.padStart(3, '0');
-    const targetDayEl = calendarDays.find(el => {
-      const cls = el.className || '';
-      const txt = el.textContent?.trim();
-      return (cls.includes(`--${dayPad3}`) || cls.includes(`--${dayStr}`) || txt === String(dayNum)) &&
-        !cls.includes('disabled') && !cls.includes('outside');
+    const targetDay = calDays.find(el => {
+      const cls = (el.className || '').toString();
+      const txt = (el.textContent || '').trim();
+      const matchText  = txt === String(dayNum) || txt === dayStr.padStart(2, '0');
+      const matchClass = cls.includes(`--${dayPad3}`) || cls.includes(`--${dayStr}`);
+      const isDisabled = cls.includes('disabled') || cls.includes('outside') ||
+                         cls.includes('past') || el.getAttribute('aria-disabled') === 'true';
+      return (matchText || matchClass) && !isDisabled;
     });
 
-    if (targetDayEl) {
-      (targetDayEl as HTMLElement).click();
+    if (targetDay) {
+      targetDay.click();
+      await new Promise(r => setTimeout(r, 200));
     }
 
     inputEl.dispatchEvent(new Event('change', { bubbles: true }));
     inputEl.dispatchEvent(new Event('blur', { bubbles: true }));
-
     return true;
   }
 
@@ -463,33 +484,65 @@ export class RailwayAdapter {
     const clean = raw.replace(/[^A-Z0-9]/g, '');
     const set = new Set<string>([raw, clean]);
 
+    // SNIGDHA
     if (raw.includes('SNIGDHA') || clean.includes('SNIGDHA')) {
-      ['SNIGDHA', 'SNIGDA', 'SNIDGHA', 'SNGDHA'].forEach(s => set.add(s));
+      ['SNIGDHA', 'SNIGDA', 'SNIDGHA', 'SNGDHA', 'SNIGDH'].forEach(s => set.add(s));
     }
+
+    // AC Seat
     if (raw.includes('AC_S') || raw.includes('AC S') || clean === 'ACS') {
-      ['AC_S', 'AC S', 'AC_SEAT', 'AC SEAT', 'AC-S', 'ACS'].forEach(s => set.add(s));
+      ['AC_S', 'AC S', 'AC_SEAT', 'AC SEAT', 'AC-S', 'ACS', 'ACSEAT'].forEach(s => set.add(s));
     }
+
+    // AC Berth
     if (raw.includes('AC_B') || raw.includes('AC B') || clean === 'ACB') {
-      ['AC_B', 'AC B', 'AC_BERTH', 'AC BERTH', 'AC-B', 'ACB'].forEach(s => set.add(s));
+      ['AC_B', 'AC B', 'AC_BERTH', 'AC BERTH', 'AC-B', 'ACB', 'ACBERTH'].forEach(s => set.add(s));
     }
-    if (raw.includes('S_CHAIR') || raw.includes('S CHAIR') || clean === 'SCHAIR') {
-      ['S_CHAIR', 'S CHAIR', 'SHOVAN CHAIR', 'S-CHAIR', 'SCHAIR'].forEach(s => set.add(s));
+
+    // Shovon Chair (S_CHAIR) — many real spellings used on BD Railway site
+    if (raw.includes('S_CHAIR') || raw.includes('S CHAIR') || clean === 'SCHAIR' ||
+        raw.includes('SHOVAN') || raw.includes('SHOVON') || raw.includes('SOBHON') ||
+        raw.includes('SHUBON') || raw.includes('SHUBHON') || raw.includes('SHUBHAN')) {
+      [
+        'S_CHAIR', 'S CHAIR', 'S-CHAIR', 'SCHAIR',
+        'SHOVAN CHAIR', 'SHOVAN_CHAIR',   // old spelling
+        'SHOVON CHAIR', 'SHOVON_CHAIR',   // common romanisation
+        'SHOVON',
+        'SOBHON CHAIR', 'SOBHON',         // alternative romanisation
+        'SHUBON CHAIR', 'SHUBON',
+        'SHUBHON CHAIR', 'SHUBHON',
+        'SHUBHAN CHAIR', 'SHUBHAN',
+        'SHOVON CH',                       // abbreviated
+        'SH CHAIR'
+      ].forEach(s => set.add(s));
     }
+
+    // SHOVAN (separate class code sometimes used)
+    if (raw === 'SHOVAN' || clean === 'SHOVAN') {
+      ['SHOVAN', 'SHOVAN_CHAIR', 'SHOVON', 'SHOVON CHAIR'].forEach(s => set.add(s));
+    }
+
+    // First Berth
     if (raw.includes('F_BERTH') || clean === 'FBERTH') {
-      ['F_BERTH', 'F BERTH', 'FIRST BERTH', 'F-BERTH', 'FBERTH'].forEach(s => set.add(s));
+      ['F_BERTH', 'F BERTH', 'FIRST BERTH', 'F-BERTH', 'FBERTH', '1ST BERTH'].forEach(s => set.add(s));
     }
+
+    // First Seat
     if (raw.includes('F_SEAT') || clean === 'FSEAT') {
-      ['F_SEAT', 'F SEAT', 'FIRST SEAT', 'F-SEAT', 'FSEAT'].forEach(s => set.add(s));
+      ['F_SEAT', 'F SEAT', 'FIRST SEAT', 'F-SEAT', 'FSEAT', '1ST SEAT'].forEach(s => set.add(s));
     }
+
+    // First Chair
     if (raw.includes('F_CHAIR') || clean === 'FCHAIR') {
       ['F_CHAIR', 'F CHAIR', 'FIRST CHAIR', 'F-CHAIR', 'FCHAIR'].forEach(s => set.add(s));
     }
-    if (raw.includes('SHOVAN')) {
-      ['SHOVAN', 'SHOVAN_CHAIR'].forEach(s => set.add(s));
+
+    // Shulov
+    if (raw.includes('SHULOV') || clean === 'SHULOV') {
+      ['SHULOV', 'SHULOV CHAIR'].forEach(s => set.add(s));
     }
-    if (raw.includes('SHULOV')) {
-      ['SHULOV'].forEach(s => set.add(s));
-    }
+
+    // AC Chair
     if (raw.includes('AC_CHAIR') || clean === 'ACCHAIR') {
       ['AC_CHAIR', 'AC CHAIR', 'ACCHAIR'].forEach(s => set.add(s));
     }
@@ -744,19 +797,23 @@ export class RailwayAdapter {
     const others = this.KNOWN_CLASSES.filter(k => !this.sameClass(k, seatClass));
     let sawDisabled = false;
 
+    // ── Pass 1: DOM-text walkup ───────────────────────────────────────────
+    // For each button climb its ancestor chain.  If we find an ancestor whose
+    // text mentions ONLY our target class (and no other known class) the
+    // button belongs to that class row.
     for (const btn of candidates) {
       let node: HTMLElement | null = btn;
       while (node) {
         const text = node.textContent || '';
         const hitsTarget = this.textMatchesClass(text, seatClass);
-        const hitsOther = others.some(k => this.textMatchesClass(text, k));
+        const hitsOther  = others.some(k => this.textMatchesClass(text, k));
 
         if (hitsTarget && !hitsOther) {
           if (this.isEnabled(btn)) return { button: btn, reason: '' };
           sawDisabled = true;
           break;
         }
-        if (hitsTarget || hitsOther) break; // belongs to another class, or a shared container
+        if (hitsTarget || hitsOther) break;
         if (node === card) break;
         node = node.parentElement;
       }
@@ -765,6 +822,52 @@ export class RailwayAdapter {
     if (sawDisabled) {
       return { button: null, reason: `Book button for ${seatClass} is disabled (class sold out?)` };
     }
+
+    // ── Pass 2: positional heuristic ─────────────────────────────────────
+    // The site may render classes in a table/flex list where every row has
+    // the class-name label and a Book button as SIBLINGS (not ancestor/descendant).
+    // Find all elements in the card whose text contains our target class,
+    // then return the Book button that is vertically closest to that label.
+    const classLabels = (Array.from(card.querySelectorAll('*')) as HTMLElement[])
+      .filter(el =>
+        el.children.length === 0 &&
+        this.textMatchesClass(el.textContent || '', seatClass) &&
+        !others.some(k => this.textMatchesClass(el.textContent || '', k))
+      );
+
+    if (classLabels.length > 0 && candidates.length > 0) {
+      // Pick the label with the best geometry
+      const label = classLabels[0];
+      const lr = label.getBoundingClientRect();
+
+      // Score each button by vertical+horizontal proximity to the label
+      let bestBtn: HTMLElement | null = null;
+      let bestDist = Infinity;
+      for (const btn of candidates) {
+        const br = btn.getBoundingClientRect();
+        // Prefer buttons on the same horizontal band (same row in a table)
+        const vertDist = Math.abs(br.top - lr.top) + Math.abs(br.bottom - lr.bottom);
+        const horzDist = Math.abs(br.left - lr.left);
+        const dist = vertDist * 3 + horzDist;
+        if (dist < bestDist && this.isEnabled(btn)) {
+          bestDist = dist;
+          bestBtn = btn;
+        }
+      }
+
+      if (bestBtn) {
+        console.log('[Railway] findClassBookButton: using positional heuristic for', seatClass, '→', bestBtn);
+        return { button: bestBtn, reason: '' };
+      }
+    }
+
+    // ── Pass 3: if only ONE Book button exists in the whole card, use it ──
+    // (card is already confirmed to be for the right train)
+    if (candidates.length === 1 && this.isEnabled(candidates[0])) {
+      console.log('[Railway] findClassBookButton: single-button fallback for', seatClass);
+      return { button: candidates[0], reason: '' };
+    }
+
     return { button: null, reason: `No Book button found next to seat class '${seatClass}' in this train card` };
   }
 

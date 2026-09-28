@@ -203,4 +203,80 @@ describe('Seat Map Engine & Spatial Algorithms', () => {
     expect(rank('face_to_face')).toBeLessThan(rank('adjacent', 'Fallback to same physical row'));
     expect(rank('adjacent', 'Fallback to same physical row')).toBeLessThan(rank('best_available'));
   });
+
+  it('correctly distinguishes Single Cabin vs Double Cabin in full AC_B 18-berth layout', () => {
+    const grid = [
+      ['GHA-LO-1', 'GHA-LO-2'],            // Single Cabin 1
+      ['GHA-LO-3', 'GHA-UP-4'],            // Double Cabin 1 (Row 2)
+      ['GHA-LO-5', 'GHA-UP-6'],            // Double Cabin 1 (Row 3)
+      ['GHA-LO-7', 'GHA-UP-8'],            // Single Cabin 2
+      ['GHA-LO-9', 'GHA-UP-10'],           // Single Cabin 3
+      ['GHA-LO-11', 'GHA-UP-12'],          // Single Cabin 4
+      ['GHA-LO-13', 'GHA-UP-14'],          // Double Cabin 2 (Row 7)
+      ['GHA-LO-15', 'GHA-UP-16'],          // Double Cabin 2 (Row 8)
+      ['GHA-LO-17', 'GHA-LO-18']           // Single Cabin 5
+    ];
+    const coach = SeatMapParser.createSyntheticCoach('GHA', grid);
+
+    // Single Cabin pairs
+    const singlePairs = SeatRelationshipAnalyzer.findSingleCabinAdjacentSeats(coach, 2, 'AC_B');
+    const singleNames = singlePairs.map(g => g.map(s => s.name).join('+'));
+    expect(singleNames).toEqual([
+      'GHA-LO-1+GHA-LO-2',
+      'GHA-LO-7+GHA-UP-8',
+      'GHA-LO-9+GHA-UP-10',
+      'GHA-LO-11+GHA-UP-12',
+      'GHA-LO-17+GHA-LO-18'
+    ]);
+
+    // Double Cabin pairs
+    const doublePairs = SeatRelationshipAnalyzer.findDoubleCabinAdjacentSeats(coach, 2, 'AC_B');
+    const doubleNames = doublePairs.map(g => g.map(s => s.name).join('+'));
+    expect(doubleNames).toEqual([
+      'GHA-LO-3+GHA-UP-4',
+      'GHA-LO-5+GHA-UP-6',
+      'GHA-LO-13+GHA-UP-14',
+      'GHA-LO-15+GHA-UP-16'
+    ]);
+  });
+
+  it('correctly distinguishes Single Cabin (3 berths) vs Double Cabin (6 berths) in full AC_S 33-berth layout', () => {
+    const acsGrid = [
+      ['KHA-3', 'KHA-2', 'KHA-1'],          // 1st Double Cabin (Row 1)
+      ['KHA-6', 'KHA-5', 'KHA-4'],          // 1st Double Cabin (Row 2)
+      ['KHA-9', 'KHA-8', 'KHA-7'],          // 2nd Double Cabin (Row 3)
+      ['KHA-12', 'KHA-11', 'KHA-10'],       // 2nd Double Cabin (Row 4)
+      ['KHA-15', 'KHA-14', 'KHA-13'],       // 1st Single Cabin (Row 5)
+      ['KHA-18', 'KHA-17', 'KHA-16'],       // 2nd Single Cabin (Row 6)
+      ['KHA-21', 'KHA-20', 'KHA-19'],       // 3rd Single Cabin (Row 7)
+      ['KHA-24', 'KHA-23', 'KHA-22'],       // 3rd Double Cabin (Row 8)
+      ['KHA-27', 'KHA-26', 'KHA-25'],       // 3rd Double Cabin (Row 9)
+      ['KHA-30', 'KHA-29', 'KHA-28'],       // 4th Double Cabin (Row 10)
+      ['KHA-33', 'KHA-32', 'KHA-31']        // 4th Double Cabin (Row 11)
+    ];
+    const coach = SeatMapParser.createSyntheticCoach('KHA', acsGrid);
+
+    // Single Cabin 3-adjacent groups
+    const singleGroups = SeatRelationshipAnalyzer.findSingleCabinAdjacentSeats(coach, 3, 'AC_S');
+    const singleNames = singleGroups.map(g => g.map(s => s.name).join('+'));
+    expect(singleNames).toEqual([
+      'KHA-15+KHA-14+KHA-13',
+      'KHA-18+KHA-17+KHA-16',
+      'KHA-21+KHA-20+KHA-19'
+    ]);
+
+    // Double Cabin 3-adjacent groups
+    const doubleGroups = SeatRelationshipAnalyzer.findDoubleCabinAdjacentSeats(coach, 3, 'AC_S');
+    const doubleNames = doubleGroups.map(g => g.map(s => s.name).join('+'));
+    expect(doubleNames).toEqual([
+      'KHA-3+KHA-2+KHA-1',
+      'KHA-6+KHA-5+KHA-4',
+      'KHA-9+KHA-8+KHA-7',
+      'KHA-12+KHA-11+KHA-10',
+      'KHA-24+KHA-23+KHA-22',
+      'KHA-27+KHA-26+KHA-25',
+      'KHA-30+KHA-29+KHA-28',
+      'KHA-33+KHA-32+KHA-31'
+    ]);
+  });
 });

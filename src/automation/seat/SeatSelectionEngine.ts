@@ -2,6 +2,11 @@ import { SeatInfo, CoachSeatMap, SeatSelectionResult } from './SeatTypes';
 import { SeatRelationshipAnalyzer } from './SeatRelationshipAnalyzer';
 import { SeatMode } from '../../shared/types';
 
+export interface SelectionOptions {
+  cabinFilter?: 'single' | 'double' | 'any';
+  seatClass?: string;
+}
+
 export class SeatSelectionEngine {
   /**
    * Select best matching seats based on mode and fallback preferences.
@@ -11,15 +16,19 @@ export class SeatSelectionEngine {
     coaches: CoachSeatMap[],
     targetCount: number,
     mode: SeatMode,
-    allowFallback: boolean
+    allowFallback: boolean,
+    options?: SelectionOptions
   ): SeatSelectionResult {
     if (!coaches || coaches.length === 0) {
       return { success: false, seats: [], modeUsed: mode, reason: 'No coaches or seat maps available' };
     }
 
+    const cabinFilter = options?.cabinFilter || 'any';
+    const seatClass = options?.seatClass || '';
+
     // Step 1: Attempt requested mode
     for (const coach of coaches) {
-      const match = this.attemptModeInCoach(coach, targetCount, mode);
+      const match = this.attemptModeInCoach(coach, targetCount, mode, cabinFilter, seatClass);
       if (match && match.length === targetCount) {
         return { success: true, seats: match, modeUsed: mode };
       }
@@ -111,7 +120,9 @@ export class SeatSelectionEngine {
   private static attemptModeInCoach(
     coach: CoachSeatMap,
     count: number,
-    mode: SeatMode
+    mode: SeatMode,
+    cabinFilter: 'single' | 'double' | 'any' = 'any',
+    seatClass: string = ''
   ): SeatInfo[] | null {
     const available = coach.seats.filter(s => s.isAvailable);
 
@@ -134,7 +145,14 @@ export class SeatSelectionEngine {
     }
 
     if (mode === 'adjacent') {
-      const groups = SeatRelationshipAnalyzer.findAdjacentSeats(coach, count);
+      let groups: SeatInfo[][];
+      if (cabinFilter === 'single') {
+        groups = SeatRelationshipAnalyzer.findSingleCabinAdjacentSeats(coach, count, seatClass);
+      } else if (cabinFilter === 'double') {
+        groups = SeatRelationshipAnalyzer.findDoubleCabinAdjacentSeats(coach, count, seatClass);
+      } else {
+        groups = SeatRelationshipAnalyzer.findAdjacentSeats(coach, count);
+      }
       return groups.length > 0 ? groups[0] : null;
     }
 
